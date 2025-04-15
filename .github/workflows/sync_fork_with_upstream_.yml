@@ -44,11 +44,15 @@ jobs:
           git remote add upstream https://github.com/zed-industries/zed.git
           git fetch upstream
           git checkout main
-          git merge upstream/main --allow-unrelated-histories
-          # Add new file if needed (example for judge_prompt.hbs)
+          # Merge upstream/main, excluding workflow files
+          git merge upstream/main --allow-unrelated-histories --no-commit || true
+          # Revert any changes to .github/workflows/
+          git checkout HEAD -- .github/workflows/
+          # Create or update judge_prompt.hbs
           mkdir -p crates/eval/src
           echo "Template content" > crates/eval/src/judge_prompt.hbs
           git add crates/eval/src/judge_prompt.hbs
+          # Commit changes, if any
           git commit -m "Add judge_prompt.hbs and sync with upstream/main" || echo "No changes to commit"
           git push origin main
         env:
