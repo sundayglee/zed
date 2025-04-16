@@ -10,6 +10,7 @@ use anyhow::{Result, anyhow};
 use clap::Parser;
 use extension::ExtensionHostProxy;
 use futures::future;
+use futures::stream::StreamExt;
 use gpui::http_client::{Uri, read_proxy_from_env};
 use gpui::{App, AppContext, Application, AsyncApp, Entity, SemanticVersion, Task, UpdateGlobal};
 use gpui_tokio::Tokio;
@@ -43,9 +44,16 @@ struct Args {
     model: String,
     #[arg(long, value_delimiter = ',')]
     languages: Option<Vec<String>>,
+    /// How many times to run each example. Note that this is currently not very efficient as N
+    /// worktrees will be created for the examples.
+    #[arg(long, default_value = "1")]
+    repetitions: u32,
     /// How many times to run the judge on each example run.
     #[arg(long, default_value = "3")]
     judge_repetitions: u32,
+    /// Maximum number of examples to run concurrently.
+    #[arg(long, default_value = "10")]
+    concurrency: usize,
 }
 
 fn main() {
@@ -142,12 +150,20 @@ fn main() {
                     continue;
                 }
 
-                let name_len = example.name.len();
-                if name_len > max_name_width {
-                    max_name_width = example.name.len();
-                }
+                // TODO: This creates a worktree per repetition. Ideally these examples should
+                // either be run sequentially on the same worktree, or reuse worktrees when there
+                // are more examples to run than the concurrency limit.
+                for repetition_number in 0..args.repetitions {
+                    let mut example = example.clone();
+                    example.set_repetition_number(repetition_number);
 
-                examples.push(example);
+                    let name_len = example.name.len();
+                    if name_len > max_name_width {
+                        max_name_width = example.name.len();
+                    }
+
+                    examples.push(example);
+                }
             }
 
             println!("Skipped examples: {}\n", skipped.join(", "));
@@ -217,22 +233,25 @@ fn main() {
             }
 
             let judge_repetitions = args.judge_repetitions;
+            let concurrency = args.concurrency;
+
             let tasks = examples
                 .into_iter()
                 .map(|example| {
                     let app_state = app_state.clone();
                     let model = model.clone();
                     cx.spawn(async move |cx| {
-                        (
-                            run_example(&example, model, app_state, judge_repetitions, cx).await,
-                            example,
-                        )
+                        let result =
+                            run_example(&example, model, app_state, judge_repetitions, cx).await;
+                        (result, example)
                     })
                 })
                 .collect::<Vec<_>>();
 
-            let results: Vec<(Result<Vec<Result<JudgeOutput>>>, Example)> =
-                future::join_all(tasks).await;
+            let results = futures::stream::iter(tasks)
+                .buffer_unordered(concurrency)
+                .collect::<Vec<(Result<Vec<Result<JudgeOutput>>>, Example)>>()
+                .await;
 
             println!("\n\n");
             println!("========================================");
