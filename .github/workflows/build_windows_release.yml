@@ -142,7 +142,22 @@ jobs:
           [Run]
           Filename: "{app}\zed.exe"; Description: "{cm:LaunchProgram,Zed}"; Flags: nowait postinstall skipifsilent
 
+          [Registry]
+          Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; Name: "Path"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Check: NeedsAddPath('{app}')
+
           [Code]
+          function NeedsAddPath(Param: string): boolean;
+          var
+            OrigPath: string;
+          begin
+            if not RegQueryStringValue(HKEY_LOCAL_MACHINE, 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment', 'Path', OrigPath) then
+            begin
+              Result := True;
+              exit;
+            end;
+            Result := Pos(ExpandConstant(Param), OrigPath) = 0;
+          end;
+
           function InitializeSetup(): Boolean;
           begin
             Result := True;
