@@ -77,6 +77,17 @@ jobs:
           # Example: choco install pkgconfiglite
           Write-Output "Windows dependencies setup complete"
 
+      # Clean any existing zed.iss to avoid using outdated script
+      - name: Clean existing zed.iss
+        shell: pwsh
+        run: |
+          if (Test-Path "zed.iss") {
+            Remove-Item "zed.iss" -Force
+            Write-Output "Removed existing zed.iss"
+          } else {
+            Write-Output "No existing zed.iss found"
+          }
+
       # Build the release executable for zed
       - name: Build release executable
         run: cargo build --release --package zed
@@ -143,7 +154,7 @@ jobs:
           Filename: "{app}\zed.exe"; Description: "{cm:LaunchProgram,Zed}"; Flags: nowait postinstall skipifsilent
 
           [Registry]
-          Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; Name: "Path"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Check: NeedsAddPath('{app}')
+          Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Check: NeedsAddPath('{app}')
 
           [Code]
           function NeedsAddPath(Param: string): boolean;
