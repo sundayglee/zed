@@ -48,7 +48,9 @@ jobs:
           git merge upstream/main --allow-unrelated-histories --no-commit || true
           # Resolve conflicts by favoring upstream (e.g., delete judge_prompt.hbs if deleted)
           git checkout --theirs crates/eval/src/judge_prompt.hbs || git rm crates/eval/src/judge_prompt.hbs || true
-          # Revert any changes to .github/workflows/ to avoid permission issues
+          # Explicitly remove all workflow files from the index to avoid permission issues
+          git rm -r --cached .github/workflows/* || true
+          # Revert any changes to .github/workflows/ to maintain fork's state
           git checkout HEAD -- .github/workflows/ || true
           # Commit changes, if any
           git commit -m "Sync with upstream/main" || echo "No changes to commit"
