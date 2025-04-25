@@ -931,26 +931,21 @@ impl Thread {
 
         let mut request = self.to_completion_request(cx);
         if model.supports_tools() {
-            request.tools = {
-                let mut tools = Vec::new();
-                tools.extend(
-                    self.tools()
-                        .read(cx)
-                        .enabled_tools(cx)
-                        .into_iter()
-                        .filter_map(|tool| {
-                            // Skip tools that cannot be supported
-                            let input_schema = tool.input_schema(model.tool_input_format()).ok()?;
-                            Some(LanguageModelRequestTool {
-                                name: tool.name(),
-                                description: tool.description(),
-                                input_schema,
-                            })
-                        }),
-                );
-
-                tools
-            };
+            request.tools = self
+                .tools()
+                .read(cx)
+                .enabled_tools(cx)
+                .into_iter()
+                .filter_map(|tool| {
+                    // Skip tools that cannot be supported
+                    let input_schema = tool.input_schema(model.tool_input_format()).ok()?;
+                    Some(LanguageModelRequestTool {
+                        name: tool.name(),
+                        description: tool.description(),
+                        input_schema,
+                    })
+                })
+                .collect();
         }
 
         self.stream_completion(request, model, window, cx);
@@ -2102,7 +2097,7 @@ impl Thread {
     }
 
     pub fn auto_capture_telemetry(&mut self, cx: &mut Context<Self>) {
-        if !cx.has_flag::<feature_flags::ThreadAutoCapture>() {
+        if !cx.has_flag::<feature_flags::ThreadAutoCaptureFeatureFlag>() {
             return;
         }
 
