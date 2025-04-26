@@ -1,4 +1,3 @@
-use feature_flags::{DebuggerFeatureFlag, FeatureFlagAppExt as _};
 use fuzzy::{StringMatch, StringMatchCandidate};
 use gpui::{
     AnyElement, BackgroundExecutor, Entity, Focusable, FontWeight, ListSizingBehavior,
@@ -13,6 +12,8 @@ use ordered_float::OrderedFloat;
 use project::CompletionSource;
 use project::lsp_store::CompletionDocumentation;
 use project::{CodeAction, Completion, TaskSourceKind};
+use task::DebugScenario;
+use task::TaskContext;
 
 use std::{
     cell::RefCell,
@@ -39,6 +40,7 @@ pub const MENU_ASIDE_X_PADDING: Pixels = px(16.);
 pub const MENU_ASIDE_MIN_WIDTH: Pixels = px(260.);
 pub const MENU_ASIDE_MAX_WIDTH: Pixels = px(500.);
 
+#[allow(clippy::large_enum_variant)]
 pub enum CodeContextMenu {
     Completions(CompletionsMenu),
     CodeActions(CodeActionsMenu),
@@ -671,7 +673,7 @@ impl CompletionsMenu {
         #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
         enum MatchTier<'a> {
             WordStartMatch {
-                sort_score_int: Reverse<i32>,
+                sort_bucket: Reverse<i32>,
                 sort_snippet: Reverse<i32>,
                 sort_text: Option<&'a str>,
                 sort_key: (usize, &'a str),
@@ -684,11 +686,9 @@ impl CompletionsMenu {
         // Our goal here is to intelligently sort completion suggestions. We want to
         // balance the raw fuzzy match score with hints from the language server
         //
-        // We first primary sort using fuzzy score by putting matches into two buckets
-        // strong one and weak one. Among these buckets matches are then compared by
+        // We first primary sort using fuzzy score by putting matches into multiple
+        // buckets. Among these buckets matches are then compared by
         // various criteria like snippet, LSP hints, kind, label text etc.
-        //
-        const FUZZY_THRESHOLD: f64 = 0.1317;
 
         let query_start_lower = query
             .and_then(|q| q.chars().next())
@@ -712,14 +712,20 @@ impl CompletionsMenu {
                 let sort_score = Reverse(OrderedFloat(score));
                 MatchTier::OtherMatch { sort_score }
             } else {
-                let sort_score_int = Reverse(if score >= FUZZY_THRESHOLD { 1 } else { 0 });
+                // Convert fuzzy match score (0.0-1.0) to a priority bucket (0-3)
+                let sort_bucket = Reverse(match (score * 10.0).floor() as i32 {
+                    s if s >= 7 => 3,
+                    s if s >= 1 => 2,
+                    s if s > 0 => 1,
+                    _ => 0,
+                });
                 let sort_snippet = match snippet_sort_order {
                     SnippetSortOrder::Top => Reverse(if mat.is_snippet { 1 } else { 0 }),
                     SnippetSortOrder::Bottom => Reverse(if mat.is_snippet { 0 } else { 1 }),
                     SnippetSortOrder::Inline => Reverse(0),
                 };
                 MatchTier::WordStartMatch {
-                    sort_score_int,
+                    sort_bucket,
                     sort_snippet,
                     sort_text: mat.sort_text,
                     sort_key: mat.sort_key,
@@ -815,28 +821,25 @@ pub struct AvailableCodeAction {
 }
 
 #[derive(Clone)]
-pub struct CodeActionContents {
+pub(crate) struct CodeActionContents {
     tasks: Option<Rc<ResolvedTasks>>,
     actions: Option<Rc<[AvailableCodeAction]>>,
+    debug_scenarios: Vec<DebugScenario>,
+    pub(crate) context: TaskContext,
 }
 
 impl CodeActionContents {
-    pub fn new(
-        mut tasks: Option<ResolvedTasks>,
+    pub(crate) fn new(
+        tasks: Option<ResolvedTasks>,
         actions: Option<Rc<[AvailableCodeAction]>>,
-        cx: &App,
+        debug_scenarios: Vec<DebugScenario>,
+        context: TaskContext,
     ) -> Self {
-        if !cx.has_flag::<DebuggerFeatureFlag>() {
-            if let Some(tasks) = &mut tasks {
-                tasks
-                    .templates
-                    .retain(|(_, task)| !matches!(task.task_type(), task::TaskType::Debug(_)));
-            }
-        }
-
         Self {
             tasks: tasks.map(Rc::new),
             actions,
+            debug_scenarios,
+            context,
         }
     }
 
@@ -845,21 +848,13 @@ impl CodeActionContents {
     }
 
     fn len(&self) -> usize {
-        match (&self.tasks, &self.actions) {
-            (Some(tasks), Some(actions)) => actions.len() + tasks.templates.len(),
-            (Some(tasks), None) => tasks.templates.len(),
-            (None, Some(actions)) => actions.len(),
-            (None, None) => 0,
-        }
+        let tasks_len = self.tasks.as_ref().map_or(0, |tasks| tasks.templates.len());
+        let code_actions_len = self.actions.as_ref().map_or(0, |actions| actions.len());
+        tasks_len + code_actions_len + self.debug_scenarios.len()
     }
 
     fn is_empty(&self) -> bool {
-        match (&self.tasks, &self.actions) {
-            (Some(tasks), Some(actions)) => actions.is_empty() && tasks.templates.is_empty(),
-            (Some(tasks), None) => tasks.templates.is_empty(),
-            (None, Some(actions)) => actions.is_empty(),
-            (None, None) => true,
-        }
+        self.len() == 0
     }
 
     fn iter(&self) -> impl Iterator<Item = CodeActionsItem> + '_ {
@@ -878,43 +873,38 @@ impl CodeActionContents {
                     provider: available.provider.clone(),
                 })
             }))
+            .chain(
+                self.debug_scenarios
+                    .iter()
+                    .cloned()
+                    .map(CodeActionsItem::DebugScenario),
+            )
     }
 
-    pub fn get(&self, index: usize) -> Option<CodeActionsItem> {
-        match (&self.tasks, &self.actions) {
-            (Some(tasks), Some(actions)) => {
-                if index < tasks.templates.len() {
-                    tasks
-                        .templates
-                        .get(index)
-                        .cloned()
-                        .map(|(kind, task)| CodeActionsItem::Task(kind, task))
-                } else {
-                    actions.get(index - tasks.templates.len()).map(|available| {
-                        CodeActionsItem::CodeAction {
-                            excerpt_id: available.excerpt_id,
-                            action: available.action.clone(),
-                            provider: available.provider.clone(),
-                        }
-                    })
-                }
+    pub fn get(&self, mut index: usize) -> Option<CodeActionsItem> {
+        if let Some(tasks) = &self.tasks {
+            if let Some((kind, task)) = tasks.templates.get(index) {
+                return Some(CodeActionsItem::Task(kind.clone(), task.clone()));
+            } else {
+                index -= tasks.templates.len();
             }
-            (Some(tasks), None) => tasks
-                .templates
-                .get(index)
-                .cloned()
-                .map(|(kind, task)| CodeActionsItem::Task(kind, task)),
-            (None, Some(actions)) => {
-                actions
-                    .get(index)
-                    .map(|available| CodeActionsItem::CodeAction {
-                        excerpt_id: available.excerpt_id,
-                        action: available.action.clone(),
-                        provider: available.provider.clone(),
-                    })
-            }
-            (None, None) => None,
         }
+        if let Some(actions) = &self.actions {
+            if let Some(available) = actions.get(index) {
+                return Some(CodeActionsItem::CodeAction {
+                    excerpt_id: available.excerpt_id,
+                    action: available.action.clone(),
+                    provider: available.provider.clone(),
+                });
+            } else {
+                index -= actions.len();
+            }
+        }
+
+        self.debug_scenarios
+            .get(index)
+            .cloned()
+            .map(CodeActionsItem::DebugScenario)
     }
 }
 
@@ -927,6 +917,7 @@ pub enum CodeActionsItem {
         action: CodeAction,
         provider: Rc<dyn CodeActionProvider>,
     },
+    DebugScenario(DebugScenario),
 }
 
 impl CodeActionsItem {
@@ -943,16 +934,23 @@ impl CodeActionsItem {
         };
         Some(action)
     }
+    fn as_debug_scenario(&self) -> Option<&DebugScenario> {
+        let Self::DebugScenario(scenario) = self else {
+            return None;
+        };
+        Some(scenario)
+    }
 
     pub fn label(&self) -> String {
         match self {
             Self::CodeAction { action, .. } => action.lsp_action.title().to_owned(),
             Self::Task(_, task) => task.resolved_label.clone(),
+            Self::DebugScenario(scenario) => scenario.label.to_string(),
         }
     }
 }
 
-pub struct CodeActionsMenu {
+pub(crate) struct CodeActionsMenu {
     pub actions: CodeActionContents,
     pub buffer: Entity<Buffer>,
     pub selected_item: usize,
@@ -1061,19 +1059,7 @@ impl CodeActionsMenu {
                                 .inset(true)
                                 .toggle_state(selected)
                                 .when_some(action.as_code_action(), |this, action| {
-                                    this.on_click(cx.listener(move |editor, _, window, cx| {
-                                        cx.stop_propagation();
-                                        if let Some(task) = editor.confirm_code_action(
-                                            &ConfirmCodeAction {
-                                                item_ix: Some(item_ix),
-                                            },
-                                            window,
-                                            cx,
-                                        ) {
-                                            task.detach_and_log_err(cx)
-                                        }
-                                    }))
-                                    .child(
+                                    this.child(
                                         h_flex()
                                             .overflow_hidden()
                                             .child(
@@ -1086,19 +1072,7 @@ impl CodeActionsMenu {
                                     )
                                 })
                                 .when_some(action.as_task(), |this, task| {
-                                    this.on_click(cx.listener(move |editor, _, window, cx| {
-                                        cx.stop_propagation();
-                                        if let Some(task) = editor.confirm_code_action(
-                                            &ConfirmCodeAction {
-                                                item_ix: Some(item_ix),
-                                            },
-                                            window,
-                                            cx,
-                                        ) {
-                                            task.detach_and_log_err(cx)
-                                        }
-                                    }))
-                                    .child(
+                                    this.child(
                                         h_flex()
                                             .overflow_hidden()
                                             .child(task.resolved_label.replace("\n", ""))
@@ -1106,7 +1080,29 @@ impl CodeActionsMenu {
                                                 this.text_color(colors.text_accent)
                                             }),
                                     )
-                                }),
+                                })
+                                .when_some(action.as_debug_scenario(), |this, scenario| {
+                                    this.child(
+                                        h_flex()
+                                            .overflow_hidden()
+                                            .child(scenario.label.clone())
+                                            .when(selected, |this| {
+                                                this.text_color(colors.text_accent)
+                                            }),
+                                    )
+                                })
+                                .on_click(cx.listener(move |editor, _, window, cx| {
+                                    cx.stop_propagation();
+                                    if let Some(task) = editor.confirm_code_action(
+                                        &ConfirmCodeAction {
+                                            item_ix: Some(item_ix),
+                                        },
+                                        window,
+                                        cx,
+                                    ) {
+                                        task.detach_and_log_err(cx)
+                                    }
+                                })),
                         )
                     })
                     .collect()
@@ -1124,6 +1120,7 @@ impl CodeActionsMenu {
                     CodeActionsItem::CodeAction { action, .. } => {
                         action.lsp_action.title().chars().count()
                     }
+                    CodeActionsItem::DebugScenario(scenario) => scenario.label.chars().count(),
                 })
                 .map(|(ix, _)| ix),
         )
