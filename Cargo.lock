@@ -690,6 +690,7 @@ dependencies = [
  "pretty_assertions",
  "project",
  "rand 0.8.5",
+ "regex",
  "serde",
  "serde_json",
  "settings",
@@ -16878,18 +16879,22 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
+ "component",
  "db",
+ "documented",
  "editor",
  "fuzzy",
  "gpui",
  "install_cli",
  "language",
+ "linkme",
  "picker",
  "project",
  "schemars",
  "serde",
  "settings",
  "telemetry",
+ "theme",
  "ui",
  "util",
  "vim_mode_setting",
@@ -18465,7 +18470,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "0.185.0"
+version = "0.186.0"
 dependencies = [
  "activity_indicator",
  "agent",
