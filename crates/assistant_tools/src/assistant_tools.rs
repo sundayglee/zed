@@ -34,7 +34,7 @@ use assistant_settings::AssistantSettings;
 use assistant_tool::ToolRegistry;
 use copy_path_tool::CopyPathTool;
 use feature_flags::{AgentStreamEditsFeatureFlag, FeatureFlagAppExt};
-use gpui::App;
+use gpui::{App, Entity};
 use http_client::HttpClientWithUrl;
 use language_model::LanguageModelRegistry;
 use move_path_tool::MovePathTool;
@@ -48,27 +48,25 @@ use crate::code_action_tool::CodeActionTool;
 use crate::code_symbols_tool::CodeSymbolsTool;
 use crate::contents_tool::ContentsTool;
 use crate::create_directory_tool::CreateDirectoryTool;
-use crate::create_file_tool::CreateFileTool;
 use crate::delete_path_tool::DeletePathTool;
 use crate::diagnostics_tool::DiagnosticsTool;
-use crate::edit_file_tool::EditFileTool;
 use crate::fetch_tool::FetchTool;
 use crate::find_path_tool::FindPathTool;
 use crate::grep_tool::GrepTool;
 use crate::list_directory_tool::ListDirectoryTool;
 use crate::now_tool::NowTool;
-use crate::open_tool::OpenTool;
 use crate::read_file_tool::ReadFileTool;
 use crate::rename_tool::RenameTool;
 use crate::streaming_edit_file_tool::StreamingEditFileTool;
 use crate::symbol_info_tool::SymbolInfoTool;
-use crate::terminal_tool::TerminalTool;
 use crate::thinking_tool::ThinkingTool;
 
-pub use create_file_tool::CreateFileToolInput;
-pub use edit_file_tool::EditFileToolInput;
+pub use create_file_tool::{CreateFileTool, CreateFileToolInput};
+pub use edit_file_tool::{EditFileTool, EditFileToolInput};
 pub use find_path_tool::FindPathToolInput;
+pub use open_tool::OpenTool;
 pub use read_file_tool::ReadFileToolInput;
+pub use terminal_tool::TerminalTool;
 
 pub fn init(http_client: Arc<HttpClientWithUrl>, cx: &mut App) {
     assistant_tool::init(cx);
@@ -101,24 +99,29 @@ pub fn init(http_client: Arc<HttpClientWithUrl>, cx: &mut App) {
     cx.observe_global::<SettingsStore>(register_edit_file_tool)
         .detach();
 
+    register_web_search_tool(&LanguageModelRegistry::global(cx), cx);
     cx.subscribe(
         &LanguageModelRegistry::global(cx),
         move |registry, event, cx| match event {
             language_model::Event::DefaultModelChanged => {
-                let using_zed_provider = registry
-                    .read(cx)
-                    .default_model()
-                    .map_or(false, |default| default.is_provided_by_zed());
-                if using_zed_provider {
-                    ToolRegistry::global(cx).register_tool(WebSearchTool);
-                } else {
-                    ToolRegistry::global(cx).unregister_tool(WebSearchTool);
-                }
+                register_web_search_tool(&registry, cx);
             }
             _ => {}
         },
     )
     .detach();
+}
+
+fn register_web_search_tool(registry: &Entity<LanguageModelRegistry>, cx: &mut App) {
+    let using_zed_provider = registry
+        .read(cx)
+        .default_model()
+        .map_or(false, |default| default.is_provided_by_zed());
+    if using_zed_provider {
+        ToolRegistry::global(cx).register_tool(WebSearchTool);
+    } else {
+        ToolRegistry::global(cx).unregister_tool(WebSearchTool);
+    }
 }
 
 fn register_edit_file_tool(cx: &mut App) {
