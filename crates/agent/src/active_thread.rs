@@ -2,9 +2,10 @@ use crate::context::{AgentContextHandle, RULES_ICON};
 use crate::context_picker::{ContextPicker, MentionLink};
 use crate::context_store::ContextStore;
 use crate::context_strip::{ContextStrip, ContextStripEvent, SuggestContextKind};
+use crate::message_editor::insert_message_creases;
 use crate::thread::{
-    LastRestoreCheckpoint, MessageId, MessageSegment, Thread, ThreadError, ThreadEvent,
-    ThreadFeedback,
+    LastRestoreCheckpoint, MessageCrease, MessageId, MessageSegment, QueueState, Thread,
+    ThreadError, ThreadEvent, ThreadFeedback,
 };
 use crate::thread_store::{RulesLoadingError, ThreadStore};
 use crate::tool_use::{PendingToolUseStatus, ToolUse};
@@ -764,7 +765,6 @@ impl ActiveThread {
                     .unwrap()
             }
         });
-
         let mut this = Self {
             language_registry,
             thread_store,
@@ -952,6 +952,9 @@ impl ActiveThread {
             }
             ThreadEvent::UsageUpdated(usage) => {
                 self.last_usage = Some(*usage);
+            }
+            ThreadEvent::NewRequest | ThreadEvent::CompletionCanceled => {
+                cx.notify();
             }
             ThreadEvent::StreamedCompletion
             | ThreadEvent::SummaryGenerated
@@ -1240,6 +1243,7 @@ impl ActiveThread {
         &mut self,
         message_id: MessageId,
         message_segments: &[MessageSegment],
+        message_creases: &[MessageCrease],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1258,6 +1262,7 @@ impl ActiveThread {
         );
         editor.update(cx, |editor, cx| {
             editor.set_text(message_text.clone(), window, cx);
+            insert_message_creases(editor, message_creases, &self.context_store, window, cx);
             editor.focus_handle(cx).focus(window);
             editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
         });
@@ -1705,6 +1710,7 @@ impl ActiveThread {
         let Some(message) = self.thread.read(cx).message(message_id) else {
             return Empty.into_any();
         };
+        let message_creases = message.creases.clone();
 
         let Some(rendered_message) = self.rendered_messages_by_id.get(&message_id) else {
             return Empty.into_any();
@@ -1729,8 +1735,27 @@ impl ActiveThread {
 
         let show_feedback = thread.is_turn_end(ix);
 
-        let generating_label = (is_generating && is_last_message)
-            .then(|| AnimatedLabel::new("Generating").size(LabelSize::Small));
+        let generating_label = is_last_message
+            .then(|| match (thread.queue_state(), is_generating) {
+                (Some(QueueState::Sending), _) => Some(
+                    AnimatedLabel::new("Sending")
+                        .size(LabelSize::Small)
+                        .into_any_element(),
+                ),
+                (Some(QueueState::Queued { position }), _) => Some(
+                    Label::new(format!("Queue position: {position}"))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .into_any_element(),
+                ),
+                (_, true) => Some(
+                    AnimatedLabel::new("Generating")
+                        .size(LabelSize::Small)
+                        .into_any_element(),
+                ),
+                _ => None,
+            })
+            .flatten();
 
         let editing_message_state = self
             .editing_message
@@ -1900,6 +1925,7 @@ impl ActiveThread {
                                                 open_context(&context, workspace, window, cx);
                                                 cx.notify();
                                             }
+                                            cx.stop_propagation();
                                         }
                                     })),
                                 )
@@ -1985,15 +2011,13 @@ impl ActiveThread {
                                     )
                                 }),
                         )
-                        .when(editing_message_state.is_none(), |this| {
-                            this.tooltip(Tooltip::text("Click To Edit"))
-                        })
                         .on_click(cx.listener({
                             let message_segments = message.segments.clone();
                             move |this, _, window, cx| {
                                 this.start_editing_message(
                                     message_id,
                                     &message_segments,
+                                    &message_creases,
                                     window,
                                     cx,
                                 );
@@ -2102,7 +2126,7 @@ impl ActiveThread {
                 parent.child(self.render_rules_item(cx))
             })
             .child(styled_message)
-            .when(generating_label.is_some(), |this| {
+            .when_some(generating_label, |this, generating_label| {
                 this.child(
                     h_flex()
                         .h_8()
@@ -2110,7 +2134,7 @@ impl ActiveThread {
                         .mb_4()
                         .ml_4()
                         .py_1p5()
-                        .child(generating_label.unwrap()),
+                        .child(generating_label),
                 )
             })
             .when(show_feedback, move |parent| {
@@ -2361,6 +2385,7 @@ impl ActiveThread {
                                     let workspace = self.workspace.clone();
                                     move |text, window, cx| {
                                         open_markdown_link(text, workspace.clone(), window, cx);
+                                        cx.stop_propagation();
                                     }
                                 }))
                                 .into_any_element()
