@@ -8,7 +8,7 @@ use buffer_diff::{BufferDiff, BufferDiffSnapshot};
 use editor::{Editor, EditorElement, EditorMode, EditorStyle, MultiBuffer, PathKey};
 use gpui::{
     Animation, AnimationExt, AnyWindowHandle, App, AppContext, AsyncApp, Context, Entity, EntityId,
-    Task, TextStyle, TextStyleRefinement, WeakEntity, pulsating_between,
+    Task, TextStyle, WeakEntity, pulsating_between,
 };
 use language::{
     Anchor, Buffer, Capability, LanguageRegistry, LineEnding, OffsetRangeExt, Rope, TextBuffer,
@@ -239,8 +239,7 @@ impl Tool for EditFileTool {
             };
 
             let snapshot = cx.update(|cx| {
-                action_log.update(cx, |log, cx| log.track_buffer(buffer.clone(), cx));
-
+                action_log.update(cx, |log, cx| log.buffer_read(buffer.clone(), cx));
                 let base_version = diff.base_version.clone();
                 let snapshot = buffer.update(cx, |buffer, cx| {
                     buffer.finalize_last_transaction();
@@ -542,12 +541,6 @@ impl ToolCard for EditFileToolCard {
 
         let (editor, editor_line_height) = self.editor.update(cx, |editor, cx| {
             let ui_font_size = ThemeSettings::get_global(cx).ui_font_size(cx);
-
-            editor.set_text_style_refinement(TextStyleRefinement {
-                font_size: Some(ui_font_size.into()),
-                ..TextStyleRefinement::default()
-            });
-
             let line_height = editor
                 .style()
                 .map(|style| style.text.line_height_in_pixels(window.rem_size()))
@@ -565,7 +558,7 @@ impl ToolCard for EditFileToolCard {
                         font_family: settings.buffer_font.family.clone(),
                         font_features: settings.buffer_font.features.clone(),
                         font_fallbacks: settings.buffer_font.fallbacks.clone(),
-                        font_size: settings.buffer_font_size(cx).into(),
+                        font_size: ui_font_size.into(),
                         font_weight: settings.buffer_font.weight,
                         line_height: relative(settings.buffer_line_height.value()),
                         ..Default::default()
