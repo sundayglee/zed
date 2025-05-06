@@ -26,7 +26,10 @@ use gpui::{
     Task, TextStyle, WeakEntity, linear_color_stop, linear_gradient, point, pulsating_between,
 };
 use language::{Buffer, Language};
-use language_model::{ConfiguredModel, LanguageModelRequestMessage, MessageContent, RequestUsage};
+use language_model::{
+    ConfiguredModel, LanguageModelRequestMessage, MessageContent, RequestUsage,
+    ZED_CLOUD_PROVIDER_ID,
+};
 use language_model_selector::ToggleModelSelector;
 use multi_buffer;
 use project::Project;
@@ -468,12 +471,17 @@ impl MessageEditor {
         }
 
         let active_completion_mode = thread.completion_mode();
+        let max_mode_enabled = active_completion_mode == CompletionMode::Max;
 
         Some(
-            IconButton::new("max-mode", IconName::ZedMaxMode)
+            Button::new("max-mode", "Max Mode")
+                .label_size(LabelSize::Small)
+                .color(Color::Muted)
+                .icon(IconName::ZedMaxMode)
                 .icon_size(IconSize::Small)
                 .icon_color(Color::Muted)
-                .toggle_state(active_completion_mode == CompletionMode::Max)
+                .icon_position(IconPosition::Start)
+                .toggle_state(max_mode_enabled)
                 .on_click(cx.listener(move |this, _event, _window, cx| {
                     this.thread.update(cx, |thread, _cx| {
                         thread.set_completion_mode(match active_completion_mode {
@@ -482,7 +490,10 @@ impl MessageEditor {
                         });
                     });
                 }))
-                .tooltip(|_, cx| cx.new(MaxModeTooltip::new).into())
+                .tooltip(move |_window, cx| {
+                    cx.new(|_| MaxModeTooltip::new().selected(max_mode_enabled))
+                        .into()
+                })
                 .into_any_element(),
         )
     }
@@ -1060,6 +1071,17 @@ impl MessageEditor {
 
     fn render_usage_callout(&self, line_height: Pixels, cx: &mut Context<Self>) -> Option<Div> {
         if !cx.has_flag::<NewBillingFeatureFlag>() {
+            return None;
+        }
+
+        let is_using_zed_provider = self
+            .thread
+            .read(cx)
+            .configured_model()
+            .map_or(false, |model| {
+                model.provider.id().0 == ZED_CLOUD_PROVIDER_ID
+            });
+        if !is_using_zed_provider {
             return None;
         }
 
