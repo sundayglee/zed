@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
-use assistant_settings::AssistantSettings;
+use assistant_settings::{AssistantSettings, CompletionMode};
 use assistant_tool::{ActionLog, AnyToolCard, Tool, ToolWorkingSet};
 use chrono::{DateTime, Utc};
 use collections::HashMap;
@@ -37,7 +37,7 @@ use settings::Settings;
 use thiserror::Error;
 use util::{ResultExt as _, TryFutureExt as _, post_inc};
 use uuid::Uuid;
-use zed_llm_client::{CompletionMode, CompletionRequestStatus};
+use zed_llm_client::CompletionRequestStatus;
 
 use crate::ThreadStore;
 use crate::context::{AgentContext, AgentContextHandle, ContextLoadResult, LoadedContext};
@@ -267,7 +267,7 @@ impl DetailedSummaryState {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct TotalTokenUsage {
     pub total: usize,
     pub max: usize,
@@ -312,14 +312,6 @@ pub enum TokenUsageRatio {
     Exceeded,
 }
 
-fn default_completion_mode(cx: &App) -> CompletionMode {
-    if cx.is_staff() {
-        CompletionMode::Max
-    } else {
-        CompletionMode::Normal
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub enum QueueState {
     Sending,
@@ -336,7 +328,7 @@ pub struct Thread {
     detailed_summary_task: Task<Option<()>>,
     detailed_summary_tx: postage::watch::Sender<DetailedSummaryState>,
     detailed_summary_rx: postage::watch::Receiver<DetailedSummaryState>,
-    completion_mode: CompletionMode,
+    completion_mode: assistant_settings::CompletionMode,
     messages: Vec<Message>,
     next_message_id: MessageId,
     last_prompt_id: PromptId,
@@ -395,7 +387,7 @@ impl Thread {
             detailed_summary_task: Task::ready(None),
             detailed_summary_tx,
             detailed_summary_rx,
-            completion_mode: default_completion_mode(cx),
+            completion_mode: AssistantSettings::get_global(cx).preferred_completion_mode,
             messages: Vec::new(),
             next_message_id: MessageId(0),
             last_prompt_id: PromptId::new(),
@@ -464,6 +456,10 @@ impl Thread {
                 .or_else(|| registry.default_model())
         });
 
+        let completion_mode = serialized
+            .completion_mode
+            .unwrap_or_else(|| AssistantSettings::get_global(cx).preferred_completion_mode);
+
         Self {
             id,
             updated_at: serialized.updated_at,
@@ -472,7 +468,7 @@ impl Thread {
             detailed_summary_task: Task::ready(None),
             detailed_summary_tx,
             detailed_summary_rx,
-            completion_mode: default_completion_mode(cx),
+            completion_mode,
             messages: serialized
                 .messages
                 .into_iter()
@@ -1095,6 +1091,7 @@ impl Thread {
                         provider: model.provider.id().0.to_string(),
                         model: model.model.id().0.to_string(),
                     }),
+                completion_mode: Some(this.completion_mode),
             })
         })
     }
@@ -1148,7 +1145,7 @@ impl Thread {
             messages: vec![],
             tools: Vec::new(),
             stop: Vec::new(),
-            temperature: None,
+            temperature: AssistantSettings::temperature_for_model(&model, cx),
         };
 
         let available_tools = self.available_tools(cx, model.clone());
@@ -1246,15 +1243,20 @@ impl Thread {
 
         request.tools = available_tools;
         request.mode = if model.supports_max_mode() {
-            Some(self.completion_mode)
+            Some(self.completion_mode.into())
         } else {
-            Some(CompletionMode::Normal)
+            Some(CompletionMode::Normal.into())
         };
 
         request
     }
 
-    fn to_summarize_request(&self, added_user_message: String) -> LanguageModelRequest {
+    fn to_summarize_request(
+        &self,
+        model: &Arc<dyn LanguageModel>,
+        added_user_message: String,
+        cx: &App,
+    ) -> LanguageModelRequest {
         let mut request = LanguageModelRequest {
             thread_id: None,
             prompt_id: None,
@@ -1262,7 +1264,7 @@ impl Thread {
             messages: vec![],
             tools: Vec::new(),
             stop: Vec::new(),
-            temperature: None,
+            temperature: AssistantSettings::temperature_for_model(model, cx),
         };
 
         for message in &self.messages {
@@ -1699,7 +1701,7 @@ impl Thread {
             If the conversation is about a specific subject, include it in the title. \
             Be descriptive. DO NOT speak in the first person.";
 
-        let request = self.to_summarize_request(added_user_message.into());
+        let request = self.to_summarize_request(&model.model, added_user_message.into(), cx);
 
         self.pending_summary = cx.spawn(async move |this, cx| {
             async move {
@@ -1785,7 +1787,7 @@ impl Thread {
              4. Any action items or next steps if any\n\
              Format it in Markdown with headings and bullet points.";
 
-        let request = self.to_summarize_request(added_user_message.into());
+        let request = self.to_summarize_request(&model, added_user_message.into(), cx);
 
         *self.detailed_summary_tx.borrow_mut() = DetailedSummaryState::Generating {
             message_id: last_message_id,
@@ -2658,7 +2660,7 @@ struct PendingCompletion {
 mod tests {
     use super::*;
     use crate::{ThreadStore, context::load_context, context_store::ContextStore, thread_store};
-    use assistant_settings::AssistantSettings;
+    use assistant_settings::{AssistantSettings, LanguageModelParameters};
     use assistant_tool::ToolRegistry;
     use editor::EditorSettings;
     use gpui::TestAppContext;
@@ -3067,6 +3069,100 @@ fn main() {{
             expected_content,
             "Last message should be exactly the stale buffer notification"
         );
+    }
+
+    #[gpui::test]
+    async fn test_temperature_setting(cx: &mut TestAppContext) {
+        init_test_settings(cx);
+
+        let project = create_test_project(
+            cx,
+            json!({"code.rs": "fn main() {\n    println!(\"Hello, world!\");\n}"}),
+        )
+        .await;
+
+        let (_workspace, _thread_store, thread, _context_store, model) =
+            setup_test_environment(cx, project.clone()).await;
+
+        // Both model and provider
+        cx.update(|cx| {
+            AssistantSettings::override_global(
+                AssistantSettings {
+                    model_parameters: vec![LanguageModelParameters {
+                        provider: Some(model.provider_id().0.to_string().into()),
+                        model: Some(model.id().0.clone()),
+                        temperature: Some(0.66),
+                    }],
+                    ..AssistantSettings::get_global(cx).clone()
+                },
+                cx,
+            );
+        });
+
+        let request = thread.update(cx, |thread, cx| {
+            thread.to_completion_request(model.clone(), cx)
+        });
+        assert_eq!(request.temperature, Some(0.66));
+
+        // Only model
+        cx.update(|cx| {
+            AssistantSettings::override_global(
+                AssistantSettings {
+                    model_parameters: vec![LanguageModelParameters {
+                        provider: None,
+                        model: Some(model.id().0.clone()),
+                        temperature: Some(0.66),
+                    }],
+                    ..AssistantSettings::get_global(cx).clone()
+                },
+                cx,
+            );
+        });
+
+        let request = thread.update(cx, |thread, cx| {
+            thread.to_completion_request(model.clone(), cx)
+        });
+        assert_eq!(request.temperature, Some(0.66));
+
+        // Only provider
+        cx.update(|cx| {
+            AssistantSettings::override_global(
+                AssistantSettings {
+                    model_parameters: vec![LanguageModelParameters {
+                        provider: Some(model.provider_id().0.to_string().into()),
+                        model: None,
+                        temperature: Some(0.66),
+                    }],
+                    ..AssistantSettings::get_global(cx).clone()
+                },
+                cx,
+            );
+        });
+
+        let request = thread.update(cx, |thread, cx| {
+            thread.to_completion_request(model.clone(), cx)
+        });
+        assert_eq!(request.temperature, Some(0.66));
+
+        // Same model name, different provider
+        cx.update(|cx| {
+            AssistantSettings::override_global(
+                AssistantSettings {
+                    model_parameters: vec![LanguageModelParameters {
+                        provider: Some("anthropic".into()),
+                        model: Some(model.id().0.clone()),
+                        temperature: Some(0.66),
+                    }],
+                    ..AssistantSettings::get_global(cx).clone()
+                },
+                cx,
+            );
+        });
+
+        let request = thread.update(cx, |thread, cx| {
+            thread.to_completion_request(model.clone(), cx)
+        });
+        assert_eq!(request.temperature, None);
     }
 
     fn init_test_settings(cx: &mut TestAppContext) {

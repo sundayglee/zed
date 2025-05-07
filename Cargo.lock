@@ -595,6 +595,7 @@ version = "0.1.0"
 dependencies = [
  "anthropic",
  "anyhow",
+ "collections",
  "deepseek",
  "feature_flags",
  "fs",
@@ -612,6 +613,7 @@ dependencies = [
  "serde_json_lenient",
  "settings",
  "workspace-hack",
+ "zed_llm_client",
 ]
 
 [[package]]
@@ -3005,6 +3007,7 @@ dependencies = [
  "anyhow",
  "assistant",
  "assistant_context_editor",
+ "assistant_settings",
  "assistant_slash_command",
  "assistant_tool",
  "async-stripe",
@@ -18694,7 +18697,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "0.186.0"
+version = "0.187.0"
 dependencies = [
  "activity_indicator",
  "agent",
