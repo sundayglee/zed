@@ -8,11 +8,11 @@ use assistant_tool::{
     ActionLog, AnyToolCard, Tool, ToolCard, ToolResult, ToolResultOutput, ToolUseStatus,
 };
 use buffer_diff::{BufferDiff, BufferDiffSnapshot};
-use editor::{Editor, EditorElement, EditorMode, EditorStyle, MultiBuffer, PathKey};
+use editor::{Editor, EditorMode, MultiBuffer, PathKey};
 use futures::StreamExt;
 use gpui::{
     Animation, AnimationExt, AnyWindowHandle, App, AppContext, AsyncApp, Entity, EntityId, Task,
-    TextStyle, WeakEntity, pulsating_between,
+    TextStyleRefinement, WeakEntity, pulsating_between,
 };
 use indoc::formatdoc;
 use language::{
@@ -360,9 +360,9 @@ impl EditFileToolCard {
             editor.set_show_gutter(false, cx);
             editor.disable_inline_diagnostics();
             editor.disable_expand_excerpt_buttons(cx);
+            editor.disable_scrollbars_and_minimap(cx);
             editor.set_soft_wrap_mode(SoftWrap::None, cx);
             editor.scroll_manager.set_forbid_vertical_scroll(true);
-            editor.set_show_scrollbars(false, cx);
             editor.set_show_indent_guides(false, cx);
             editor.set_read_only(true);
             editor.set_show_breakpoints(false, cx);
@@ -574,33 +574,16 @@ impl ToolCard for EditFileToolCard {
                 .map(|style| style.text.line_height_in_pixels(window.rem_size()))
                 .unwrap_or_default();
 
-            let settings = ThemeSettings::get_global(cx);
-            let element = EditorElement::new(
-                &cx.entity(),
-                EditorStyle {
-                    background: cx.theme().colors().editor_background,
-                    horizontal_padding: rems(0.25).to_pixels(window.rem_size()),
-                    local_player: cx.theme().players().local(),
-                    text: TextStyle {
-                        color: cx.theme().colors().editor_foreground,
-                        font_family: settings.buffer_font.family.clone(),
-                        font_features: settings.buffer_font.features.clone(),
-                        font_fallbacks: settings.buffer_font.fallbacks.clone(),
-                        font_size: TextSize::Small
-                            .rems(cx)
-                            .to_pixels(settings.agent_font_size(cx))
-                            .into(),
-                        font_weight: settings.buffer_font.weight,
-                        line_height: relative(settings.buffer_line_height.value()),
-                        ..Default::default()
-                    },
-                    scrollbar_width: EditorElement::SCROLLBAR_WIDTH,
-                    syntax: cx.theme().syntax().clone(),
-                    status: cx.theme().status().clone(),
-                    ..Default::default()
-                },
-            );
-
+            editor.set_text_style_refinement(TextStyleRefinement {
+                font_size: Some(
+                    TextSize::Small
+                        .rems(cx)
+                        .to_pixels(ThemeSettings::get_global(cx).agent_font_size(cx))
+                        .into(),
+                ),
+                ..TextStyleRefinement::default()
+            });
+            let element = editor.render(window, cx);
             (element.into_any_element(), line_height)
         });
 
