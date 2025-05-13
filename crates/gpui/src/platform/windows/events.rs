@@ -93,6 +93,7 @@ pub(crate) fn handle_msg(
         WM_IME_COMPOSITION => handle_ime_composition(handle, lparam, state_ptr),
         WM_SETCURSOR => handle_set_cursor(lparam, state_ptr),
         WM_SETTINGCHANGE => handle_system_settings_changed(handle, lparam, state_ptr),
+        WM_INPUTLANGCHANGE => handle_input_language_changed(lparam, state_ptr),
         WM_GPUI_CURSOR_STYLE_CHANGED => handle_cursor_changed(lparam, state_ptr),
         _ => None,
     };
@@ -341,18 +342,32 @@ fn handle_syskeydown_msg(
     lparam: LPARAM,
     state_ptr: Rc<WindowsWindowStatePtr>,
 ) -> Option<isize> {
-    // we need to call `DefWindowProcW`, or we will lose the system-wide `Alt+F4`, `Alt+{other keys}`
-    // shortcuts.
-    let keystroke = parse_syskeydown_msg_keystroke(wparam)?;
-    let mut func = state_ptr.state.borrow_mut().callbacks.input.take()?;
-    let event = KeyDownEvent {
-        keystroke,
-        is_held: lparam.0 & (0x1 << 30) > 0,
+    let mut lock = state_ptr.state.borrow_mut();
+    let vkey = wparam.loword();
+    let input = if is_modifier(VIRTUAL_KEY(vkey)) {
+        let modifiers = current_modifiers();
+        if let Some(prev_modifiers) = lock.last_reported_modifiers {
+            if prev_modifiers == modifiers {
+                return Some(0);
+            }
+        }
+        lock.last_reported_modifiers = Some(modifiers);
+        PlatformInput::ModifiersChanged(ModifiersChangedEvent { modifiers })
+    } else {
+        let keystroke = parse_syskeydown_msg_keystroke(wparam)?;
+        PlatformInput::KeyDown(KeyDownEvent {
+            keystroke,
+            is_held: lparam.0 & (0x1 << 30) > 0,
+        })
     };
-    let result = if !func(PlatformInput::KeyDown(event)).propagate {
+    let mut func = lock.callbacks.input.take()?;
+    drop(lock);
+    let result = if !func(input).propagate {
         state_ptr.state.borrow_mut().system_key_handled = true;
         Some(0)
     } else {
+        // we need to call `DefWindowProcW`, or we will lose the system-wide `Alt+F4`, `Alt+{other keys}`
+        // shortcuts.
         None
     };
     state_ptr.state.borrow_mut().callbacks.input = Some(func);
@@ -361,15 +376,29 @@ fn handle_syskeydown_msg(
 }
 
 fn handle_syskeyup_msg(wparam: WPARAM, state_ptr: Rc<WindowsWindowStatePtr>) -> Option<isize> {
-    // we need to call `DefWindowProcW`, or we will lose the system-wide `Alt+F4`, `Alt+{other keys}`
-    // shortcuts.
-    let keystroke = parse_syskeydown_msg_keystroke(wparam)?;
-    let mut func = state_ptr.state.borrow_mut().callbacks.input.take()?;
-    let event = KeyUpEvent { keystroke };
-    let result = if func(PlatformInput::KeyUp(event)).default_prevented {
+    let mut lock = state_ptr.state.borrow_mut();
+    let vkey = wparam.loword();
+    let input = if is_modifier(VIRTUAL_KEY(vkey)) {
+        let modifiers = current_modifiers();
+        if let Some(prev_modifiers) = lock.last_reported_modifiers {
+            if prev_modifiers == modifiers {
+                return Some(0);
+            }
+        }
+        lock.last_reported_modifiers = Some(modifiers);
+        PlatformInput::ModifiersChanged(ModifiersChangedEvent { modifiers })
+    } else {
+        let keystroke = parse_syskeydown_msg_keystroke(wparam)?;
+        PlatformInput::KeyUp(KeyUpEvent { keystroke })
+    };
+    let mut func = lock.callbacks.input.take()?;
+    drop(lock);
+    let result = if !func(input).propagate {
         Some(0)
     } else {
-        Some(1)
+        // we need to call `DefWindowProcW`, or we will lose the system-wide `Alt+F4`, `Alt+{other keys}`
+        // shortcuts.
+        None
     };
     state_ptr.state.borrow_mut().callbacks.input = Some(func);
 
@@ -421,17 +450,23 @@ fn handle_keyup_msg(wparam: WPARAM, state_ptr: Rc<WindowsWindowStatePtr>) -> Opt
         return Some(1);
     };
     let mut lock = state_ptr.state.borrow_mut();
-    let Some(mut func) = lock.callbacks.input.take() else {
-        return Some(1);
-    };
-    drop(lock);
 
     let event = match keystroke_or_modifier {
         KeystrokeOrModifier::Keystroke(keystroke) => PlatformInput::KeyUp(KeyUpEvent { keystroke }),
         KeystrokeOrModifier::Modifier(modifiers) => {
+            if let Some(prev_modifiers) = lock.last_reported_modifiers {
+                if prev_modifiers == modifiers {
+                    return Some(0);
+                }
+            }
+            lock.last_reported_modifiers = Some(modifiers);
             PlatformInput::ModifiersChanged(ModifiersChangedEvent { modifiers })
         }
     };
+    let Some(mut func) = lock.callbacks.input.take() else {
+        return Some(1);
+    };
+    drop(lock);
 
     let result = if func(event).default_prevented {
         Some(0)
@@ -1242,6 +1277,18 @@ fn handle_system_theme_changed(
     callback();
     state_ptr.state.borrow_mut().callbacks.appearance_changed = Some(callback);
     configure_dwm_dark_mode(handle);
+    Some(0)
+}
+
+fn handle_input_language_changed(
+    lparam: LPARAM,
+    state_ptr: Rc<WindowsWindowStatePtr>,
+) -> Option<isize> {
+    let thread = state_ptr.main_thread_id_win32;
+    let validation = state_ptr.validation_number;
+    unsafe {
+        PostThreadMessageW(thread, WM_INPUTLANGCHANGE, WPARAM(validation), lparam).log_err();
+    }
     Some(0)
 }
 
