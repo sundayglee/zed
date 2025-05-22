@@ -59,6 +59,7 @@ use client::{Collaborator, ParticipantIndex};
 use clock::{AGENT_REPLICA_ID, ReplicaId};
 use collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use convert_case::{Case, Casing};
+use dap::TelemetrySpawnLocation;
 use display_map::*;
 pub use display_map::{ChunkRenderer, ChunkRendererContext, DisplayPoint, FoldPlaceholder};
 pub use editor_settings::{
@@ -5619,6 +5620,7 @@ impl Editor {
                 let context = actions_menu.actions.context.clone();
 
                 workspace.update(cx, |workspace, cx| {
+                    dap::send_telemetry(&scenario, TelemetrySpawnLocation::Gutter, cx);
                     workspace.start_debug_session(scenario, context, Some(buffer), window, cx);
                 });
                 Some(Task::ready(Ok(())))
@@ -6523,6 +6525,10 @@ impl Editor {
                     provider.accept(cx);
                 }
 
+                // Store the transaction ID and selections before applying the edit
+                let transaction_id_prev =
+                    self.buffer.read_with(cx, |b, cx| b.last_transaction_id(cx));
+
                 let snapshot = self.buffer.read(cx).snapshot(cx);
                 let last_edit_end = edits.last().unwrap().0.end.bias_right(&snapshot);
 
@@ -6531,8 +6537,19 @@ impl Editor {
                 });
 
                 self.change_selections(None, window, cx, |s| {
-                    s.select_anchor_ranges([last_edit_end..last_edit_end])
+                    s.select_anchor_ranges([last_edit_end..last_edit_end]);
                 });
+
+                let selections = self.selections.disjoint_anchors();
+                if let Some(transaction_id_now) =
+                    self.buffer.read_with(cx, |b, cx| b.last_transaction_id(cx))
+                {
+                    let has_new_transaction = transaction_id_prev != Some(transaction_id_now);
+                    if has_new_transaction {
+                        self.selection_history
+                            .insert_transaction(transaction_id_now, selections);
+                    }
+                }
 
                 self.update_visible_inline_completion(window, cx);
                 if self.active_inline_completion.is_none() {
