@@ -225,7 +225,7 @@ impl Markdown {
         self.parse(cx);
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn parsed_markdown(&self) -> &ParsedMarkdown {
         &self.parsed_markdown
     }
@@ -1209,6 +1209,7 @@ impl Element for MarkdownElement {
     ) -> Self::PrepaintState {
         let focus_handle = self.markdown.read(cx).focus_handle.clone();
         window.set_focus_handle(&focus_handle, cx);
+        window.set_view_id(self.markdown.entity_id());
 
         let hitbox = window.insert_hitbox(bounds, false);
         rendered_markdown.element.prepaint(window, cx);

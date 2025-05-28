@@ -24,7 +24,7 @@ use language_model::{
     LanguageModelRequestMessage, LanguageModelRequestTool, LanguageModelToolResult,
     LanguageModelToolResultContent, LanguageModelToolUseId, MessageContent,
     ModelRequestLimitReachedError, PaymentRequiredError, RequestUsage, Role, SelectedModel,
-    StopReason, TokenUsage, WrappedTextContent,
+    StopReason, TokenUsage,
 };
 use postage::stream::Stream as _;
 use project::Project;
@@ -891,10 +891,7 @@ impl Thread {
 
     pub fn output_for_tool(&self, id: &LanguageModelToolUseId) -> Option<&Arc<str>> {
         match &self.tool_use.tool_result(id)?.content {
-            LanguageModelToolResultContent::Text(text)
-            | LanguageModelToolResultContent::WrappedText(WrappedTextContent { text, .. }) => {
-                Some(text)
-            }
+            LanguageModelToolResultContent::Text(text) => Some(text),
             LanguageModelToolResultContent::Image(_) => {
                 // TODO: We should display image
                 None
@@ -2593,11 +2590,7 @@ impl Thread {
 
                 writeln!(markdown, "**\n")?;
                 match &tool_result.content {
-                    LanguageModelToolResultContent::Text(text)
-                    | LanguageModelToolResultContent::WrappedText(WrappedTextContent {
-                        text,
-                        ..
-                    }) => {
+                    LanguageModelToolResultContent::Text(text) => {
                         writeln!(markdown, "{text}")?;
                     }
                     LanguageModelToolResultContent::Image(image) => {
@@ -3414,8 +3407,8 @@ fn main() {{
         });
 
         cx.run_until_parked();
-        fake_model.stream_last_completion_response("Brief".into());
-        fake_model.stream_last_completion_response(" Introduction".into());
+        fake_model.stream_last_completion_response("Brief");
+        fake_model.stream_last_completion_response(" Introduction");
         fake_model.end_last_completion_stream();
         cx.run_until_parked();
 
@@ -3508,7 +3501,7 @@ fn main() {{
         });
 
         cx.run_until_parked();
-        fake_model.stream_last_completion_response("A successful summary".into());
+        fake_model.stream_last_completion_response("A successful summary");
         fake_model.end_last_completion_stream();
         cx.run_until_parked();
 
@@ -3550,7 +3543,7 @@ fn main() {{
 
     fn simulate_successful_response(fake_model: &FakeLanguageModel, cx: &mut TestAppContext) {
         cx.run_until_parked();
-        fake_model.stream_last_completion_response("Assistant response".into());
+        fake_model.stream_last_completion_response("Assistant response");
         fake_model.end_last_completion_stream();
         cx.run_until_parked();
     }
