@@ -40,6 +40,17 @@ jobs:
           }
           Write-Output "D: drive is accessible"
 
+      # Verify Inno Setup is available
+      - name: Verify Inno Setup
+        shell: pwsh
+        run: |
+          if (-Not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) {
+            Write-Error "Inno Setup not found at C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+            exit 1
+          }
+          Write-Output "Inno Setup found"
+        timeout-minutes: 1
+
       # Install Rust toolchain
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -74,12 +85,37 @@ jobs:
             Write-Output "No existing zed.iss found"
           }
 
+      # Extract version from Cargo.toml
+      - name: Extract version
+        id: extract_version
+        shell: pwsh
+        run: |
+          $content = Get-Content crates\zed\Cargo.toml -Raw
+          if ($content -match '\[package\][^\[]*name = "zed"[^\[]*version = "([^"]+)"') {
+            $version = $matches[1]
+            Write-Output "Extracted version: $version"
+            echo "version=$version" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Error "Failed to extract version for zed package from Cargo.toml"
+            exit 1
+          }
+
       # Build the release executable for zed
       - name: Build release executable
-        run: cargo build --release --package zed --no-default-features
+        run: cargo build --release --package zed
         env:
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
           CARGO_PROFILE_RELEASE_LTO: thin
+
+      # Verify the executable exists
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          if (-Not (Test-Path "target\release\zed.exe")) {
+            Write-Error "Executable not found at target\release\zed.exe"
+            exit 1
+          }
+          Write-Output "Executable found: target\release\zed.exe"
 
       # Create Inno Setup script
       - name: Create Inno Setup script
@@ -149,6 +185,16 @@ jobs:
           }
           Write-Output "EXE installer created at Output\zed-windows-x86_64.exe"
 
+      # Verify the installer exists
+      - name: Verify installer
+        shell: pwsh
+        run: |
+          if (-Not (Test-Path "Output\zed-windows-x86_64.exe")) {
+            Write-Error "Installer not found at Output\zed-windows-x86_64.exe"
+            exit 1
+          }
+          Write-Output "Installer found: Output\zed-windows-x86_64.exe"
+
       # Upload installer as artifact (for debugging)
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
@@ -157,15 +203,24 @@ jobs:
           path: Output/zed-windows-x86_64.exe
           retention-days: 5
 
+      # Generate timestamp for release tag
+      - name: Generate timestamp
+        id: timestamp
+        shell: pwsh
+        run: |
+          $timestamp = Get-Date -Format "yyyy-MM-dd"
+          Write-Output "Generated timestamp: $timestamp"
+          echo "date=$timestamp" >> $env:GITHUB_OUTPUT
+
       # Publish installer to GitHub Releases
       - name: Publish installer to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           files: Output/zed-windows-x86_64.exe
-          tag_name: v${{ steps.extract_version.outputs.version }}
-          name: Zed v${{ steps.extract_version.outputs.version }}
+          tag_name: daily-${{ steps.timestamp.outputs.date }}
+          name: Zed Daily Build ${{ steps.timestamp.outputs.date }}
           draft: false
-          prerelease: false
+          prerelease: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
