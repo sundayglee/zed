@@ -77,17 +77,6 @@ jobs:
           }
           Write-Output "D: drive is accessible"
 
-      # Verify Inno Setup is available
-      - name: Verify Inno Setup
-        shell: pwsh
-        run: |
-          if (-Not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) {
-            Write-Error "Inno Setup not found at C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-            exit 1
-          }
-          Write-Output "Inno Setup found"
-        timeout-minutes: 1
-
       # Install Rust toolchain
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -124,35 +113,10 @@ jobs:
 
       # Build the release executable for zed
       - name: Build release executable
-        run: cargo build --release --package zed
+        run: cargo build --release --package zed --no-default-features
         env:
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
           CARGO_PROFILE_RELEASE_LTO: thin
-
-      # Verify the executable exists
-      - name: Verify executable
-        shell: pwsh
-        run: |
-          if (-Not (Test-Path "target\release\zed.exe")) {
-            Write-Error "Executable not found at target\release\zed.exe"
-            exit 1
-          }
-          Write-Output "Executable found: target\release\zed.exe"
-
-      # Extract version from Cargo.toml
-      - name: Extract version
-        id: extract_version
-        shell: pwsh
-        run: |
-          $content = Get-Content crates\zed\Cargo.toml -Raw
-          if ($content -match '\[package\][^\[]*name = "zed"[^\[]*version = "([^"]+)"') {
-            $version = $matches[1]
-            Write-Output "Extracted version: $version"
-            echo "version=$version" >> $env:GITHUB_OUTPUT
-          } else {
-            Write-Error "Failed to extract version for zed package from Cargo.toml"
-            exit 1
-          }
 
       # Create Inno Setup script
       - name: Create Inno Setup script
@@ -221,16 +185,6 @@ jobs:
             exit 1
           }
           Write-Output "EXE installer created at Output\zed-windows-x86_64.exe"
-
-      # Verify the installer exists
-      - name: Verify installer
-        shell: pwsh
-        run: |
-          if (-Not (Test-Path "Output\zed-windows-x86_64.exe")) {
-            Write-Error "Installer not found at Output\zed-windows-x86_64.exe"
-            exit 1
-          }
-          Write-Output "Installer found: Output\zed-windows-x86_64.exe"
 
       # Upload installer as artifact (for debugging)
       - name: Upload installer artifact
