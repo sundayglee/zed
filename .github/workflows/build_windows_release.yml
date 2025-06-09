@@ -1,49 +1,12 @@
 name: Build Windows EXE Installer
 
 on:
-  workflow_run:
-    workflows: ["Sync Fork on Upstream Release"]  # Name of the sync workflow
-    types:
-      - completed  # Trigger after the sync workflow completes
-    branches:
-      - main  # Only trigger for the main branch
+  schedule:
+    - cron: '0 0 * * *'  # Run at midnight UTC every day
+  workflow_dispatch:  # Allow manual triggering
 
 jobs:
-  check-changes:
-    runs-on: ubuntu-latest
-    outputs:
-      has_changes: ${{ steps.check_changes.outputs.has_changes }}
-    steps:
-      # Checkout the repository
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Fetch all history for comparison
-
-      # Check for changes from upstream by comparing commits
-      - name: Check for upstream changes
-        id: check_changes
-        run: |
-          git remote add upstream https://github.com/zed-industries/zed.git
-          git fetch upstream
-          # Get the commit before the sync
-          PREV_COMMIT=$(git rev-parse HEAD^)
-          # Compare current main with upstream/main
-          CHANGES=$(git diff --name-only $PREV_COMMIT upstream/main)
-          if [ -n "$CHANGES" ]; then
-            echo "Changes detected from upstream:"
-            echo "$CHANGES"
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-          else
-            echo "No changes detected from upstream"
-            echo "has_changes=false" >> $GITHUB_OUTPUT
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   build-windows:
-    needs: check-changes  # Depend on the check-changes job
-    if: ${{ github.event.workflow_run.conclusion == 'success' && needs.check-changes.outputs.has_changes == 'true' }}
     runs-on: windows-latest
 
     env:
@@ -196,7 +159,6 @@ jobs:
 
       # Publish installer to GitHub Releases
       - name: Publish installer to GitHub Releases
-        if: github.event.workflow_run.conclusion == 'success'
         uses: softprops/action-gh-release@v2
         with:
           files: Output/zed-windows-x86_64.exe
