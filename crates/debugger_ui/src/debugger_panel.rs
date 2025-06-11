@@ -10,13 +10,13 @@ use crate::{
 };
 use anyhow::Result;
 use command_palette_hooks::CommandPaletteFilter;
-use dap::StartDebuggingRequestArguments;
 use dap::adapters::DebugAdapterName;
 use dap::debugger_settings::DebugPanelDockPosition;
 use dap::{
     ContinuedEvent, LoadedSourceEvent, ModuleEvent, OutputEvent, StoppedEvent, ThreadEvent,
     client::SessionId, debugger_settings::DebuggerSettings,
 };
+use dap::{DapRegistry, StartDebuggingRequestArguments};
 use gpui::{
     Action, App, AsyncWindowContext, Context, DismissEvent, Entity, EntityId, EventEmitter,
     FocusHandle, Focusable, MouseButton, MouseDownEvent, Point, Subscription, Task, WeakEntity,
@@ -445,10 +445,7 @@ impl DebugPanel {
         };
 
         let dap_store_handle = self.project.read(cx).dap_store().clone();
-        let mut label = parent_session.read(cx).label().clone();
-        if !label.ends_with("(child)") {
-            label = format!("{label} (child)").into();
-        }
+        let label = self.label_for_child_session(&parent_session, request, cx);
         let adapter = parent_session.read(cx).adapter().clone();
         let mut binary = parent_session.read(cx).binary().clone();
         binary.request_args = request.clone();
@@ -607,6 +604,12 @@ impl DebugPanel {
                         )
                     }
                 })
+        };
+        let documentation_button = || {
+            IconButton::new("debug-open-documentation", IconName::CircleHelp)
+                .icon_size(IconSize::Small)
+                .on_click(move |_, _, cx| cx.open_url("https://zed.dev/docs/debugger"))
+                .tooltip(Tooltip::text("Open Documentation"))
         };
 
         Some(
@@ -843,7 +846,10 @@ impl DebugPanel {
                             ),
                         )
                         .justify_around()
-                        .when(is_side, |this| this.child(new_session_button())),
+                        .when(is_side, |this| {
+                            this.child(new_session_button())
+                                .child(documentation_button())
+                        }),
                 )
                 .child(
                     h_flex()
@@ -884,7 +890,10 @@ impl DebugPanel {
                                     window,
                                     cx,
                                 ))
-                                .when(!is_side, |this| this.child(new_session_button())),
+                                .when(!is_side, |this| {
+                                    this.child(new_session_button())
+                                        .child(documentation_button())
+                                }),
                         ),
                 ),
         )
@@ -1039,6 +1048,25 @@ impl DebugPanel {
             cx.emit(PanelEvent::ZoomIn);
         }
     }
+
+    fn label_for_child_session(
+        &self,
+        parent_session: &Entity<Session>,
+        request: &StartDebuggingRequestArguments,
+        cx: &mut Context<'_, Self>,
+    ) -> SharedString {
+        let adapter = parent_session.read(cx).adapter();
+        if let Some(adapter) = DapRegistry::global(cx).adapter(&adapter) {
+            if let Some(label) = adapter.label_for_child_session(request) {
+                return label.into();
+            }
+        }
+        let mut label = parent_session.read(cx).label().clone();
+        if !label.ends_with("(child)") {
+            label = format!("{label} (child)").into();
+        }
+        label
+    }
 }
 
 async fn register_session_inner(
@@ -1066,6 +1094,11 @@ async fn register_session_inner(
     .ok();
     let serialized_layout = persistence::get_serialized_layout(adapter_name).await;
     let debug_session = this.update_in(cx, |this, window, cx| {
+        let parent_session = this
+            .sessions
+            .iter()
+            .find(|p| Some(p.read(cx).session_id(cx)) == session.read(cx).parent_id(cx))
+            .cloned();
         this.sessions.retain(|session| {
             !session
                 .read(cx)
@@ -1079,8 +1112,8 @@ async fn register_session_inner(
         let debug_session = DebugSession::running(
             this.project.clone(),
             this.workspace.clone(),
+            parent_session.map(|p| p.read(cx).running_state().read(cx).debug_terminal.clone()),
             session,
-            cx.weak_entity(),
             serialized_layout,
             this.position(window, cx).axis(),
             window,
