@@ -26,6 +26,7 @@ use dap::{
 use dap::{
     ExceptionBreakpointsFilter, ExceptionFilterOptions, OutputEvent, OutputEventCategory,
     RunInTerminalRequestArguments, StackFramePresentationHint, StartDebuggingRequestArguments,
+    StartDebuggingRequestArgumentsRequest,
 };
 use futures::SinkExt;
 use futures::channel::{mpsc, oneshot};
@@ -1008,10 +1009,41 @@ impl Session {
         request: dap::messages::Request,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
-        let request_args = serde_json::from_value::<RunInTerminalRequestArguments>(
+        let request_args = match serde_json::from_value::<RunInTerminalRequestArguments>(
             request.arguments.unwrap_or_default(),
-        )
-        .expect("To parse StartDebuggingRequestArguments");
+        ) {
+            Ok(args) => args,
+            Err(error) => {
+                return cx.spawn(async move |session, cx| {
+                    let error = serde_json::to_value(dap::ErrorResponse {
+                        error: Some(dap::Message {
+                            id: request.seq,
+                            format: error.to_string(),
+                            variables: None,
+                            send_telemetry: None,
+                            show_user: None,
+                            url: None,
+                            url_label: None,
+                        }),
+                    })
+                    .ok();
+
+                    session
+                        .update(cx, |this, cx| {
+                            this.respond_to_client(
+                                request.seq,
+                                false,
+                                StartDebugging::COMMAND.to_string(),
+                                error,
+                                cx,
+                            )
+                        })?
+                        .await?;
+
+                    Err(anyhow!("Failed to parse RunInTerminalRequestArguments"))
+                });
+            }
+        };
 
         let seq = request.seq;
 
@@ -2186,10 +2218,17 @@ impl Session {
         self.locations.get(&reference).cloned()
     }
 
+    pub fn is_attached(&self) -> bool {
+        let Mode::Running(local_mode) = &self.mode else {
+            return false;
+        };
+        local_mode.binary.request_args.request == StartDebuggingRequestArgumentsRequest::Attach
+    }
+
     pub fn disconnect_client(&mut self, cx: &mut Context<Self>) {
         let command = DisconnectCommand {
             restart: Some(false),
-            terminate_debuggee: Some(true),
+            terminate_debuggee: Some(false),
             suspend_debuggee: Some(false),
         };
 
