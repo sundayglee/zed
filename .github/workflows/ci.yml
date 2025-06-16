@@ -491,6 +491,188 @@ jobs:
           if (Test-Path "${{ env.CARGO_HOME }}/config.toml") {
             Remove-Item -Path "${{ env.CARGO_HOME }}/config.toml"  -Force
           }
+  
+  bundle-windows-x86_64:
+    timeout-minutes: 60
+    name: (Windows) Build EXE Installer
+    needs: [windows_tests]
+    if: |
+      startsWith(github.ref, 'refs/tags/v')
+      || contains(github.event.pull_request.labels.*.name, 'run-bundling')
+    runs-on: windows-2025-16
+    steps:
+      # more info here:- https://github.com/rust-lang/cargo/issues/13020
+      - name: Enable longer pathnames for git
+        run: git config --system core.longpaths true
+      - name: Checkout repo
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          clean: false
+          fetch-depth: 25
+      # Ensure CARGO_HOME is set up on D: drive for shorter paths
+      - name: Create CARGO_HOME directory
+        shell: pwsh
+        run: |
+          New-Item -Path "$env:CARGO_HOME" -ItemType Directory -Force
+          Write-Output "CARGO_HOME set to $env:CARGO_HOME"
+          if (-Not (Test-Path "D:\")) {
+            Write-Error "D: drive is not accessible"
+            exit 1
+          }
+          Write-Output "D: drive is accessible"
+      # Verify Inno Setup is available for creating the installer
+      - name: Verify Inno Setup
+        shell: pwsh
+        run: |
+          if (-Not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) {
+            Write-Error "Inno Setup not found at C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+            exit 1
+          }
+          Write-Output "Inno Setup found"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      # Cache dependencies to speed up builds
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-provider: "github"
+          prefix-key: "v1-windows-cargo-home-d-drive"
+      # Clean any existing zed.iss to avoid using outdated script
+      - name: Clean existing zed.iss
+        shell: pwsh
+        run: |
+          if (Test-Path "zed.iss") {
+            Remove-Item "zed.iss" -Force
+            Write-Output "Removed existing zed.iss"
+          } else {
+            Write-Output "No existing zed.iss found"
+          }
+      # Extract version from Cargo.toml for the installer
+      - name: Extract version
+        id: extract_version
+        shell: pwsh
+        run: |
+          $content = Get-Content crates\zed\Cargo.toml -Raw
+          if ($content -match '\[package\][^\[]*name = "zed"[^\[]*version = "([^"]+)"') {
+            $version = $matches[1]
+            Write-Output "Extracted version: $version"
+            echo "version=$version" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Error "Failed to extract version for zed package from Cargo.toml"
+            exit 1
+          }
+      # Build the release executable for zed
+      - name: Build release executable
+        run: cargo build --release --package zed
+        env:
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
+          CARGO_PROFILE_RELEASE_LTO: thin
+      # Verify the executable exists before creating the installer
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          if (-Not (Test-Path "target\release\zed.exe")) {
+            Write-Error "Executable not found at target\release\zed.exe"
+            exit 1
+          }
+          Write-Output "Executable found: target\release\zed.exe"
+      # Create Inno Setup script for the Windows installer
+      - name: Create Inno Setup script
+        shell: pwsh
+        run: |
+          $issContent = @"
+          [Setup]
+          AppName=Zed
+          AppVersion=${{ steps.extract_version.outputs.version }}
+          AppPublisher=Zed Industries
+          AppPublisherURL=https://zed.dev
+          DefaultDirName={autopf}\Zed
+          DefaultGroupName=Zed
+          OutputBaseFilename=zed-windows-x86_64
+          Compression=lzma
+          SolidCompression=yes
+          UninstallDisplayName=Zed
+          WizardStyle=modern
+          ChangesEnvironment=yes
+          [Files]
+          Source: "target\release\zed.exe"; DestDir: "{app}"; Flags: ignoreversion
+          [Icons]
+          Name: "{group}\Zed"; Filename: "{app}\zed.exe"
+          Name: "{group}\Uninstall Zed"; Filename: "{uninstallexe}"
+          Name: "{autodesktop}\Zed"; Filename: "{app}\zed.exe"; Tasks: desktopicon
+          [Tasks]
+          Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+          [Run]
+          Filename: "{app}\zed.exe"; Description: "{cm:LaunchProgram,Zed}"; Flags: nowait postinstall skipifsilent
+          [Registry]
+          Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Check: NeedsAddPath('{app}')
+          [Code]
+          function NeedsAddPath(Param: string): boolean;
+          var
+            OrigPath: string;
+          begin
+            if not RegQueryStringValue(HKEY_LOCAL_MACHINE, 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment', 'Path', OrigPath) then
+            begin
+              Result := True;
+              exit;
+            end;
+            Result := Pos(ExpandConstant(Param), OrigPath) = 0;
+          end;
+          function InitializeSetup(): Boolean;
+          begin
+            Result := True;
+          end;
+          "@
+          Set-Content -Path "zed.iss" -Value $issContent
+          Write-Output "Inno Setup script created at zed.iss"
+      # Build the EXE installer using Inno Setup
+      - name: Build EXE installer
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" zed.iss
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Inno Setup compilation failed"
+            exit 1
+          }
+          Write-Output "EXE installer created at Output\zed-windows-x86_64.exe"
+      # Verify the installer exists
+      - name: Verify installer
+        shell: pwsh
+        run: |
+          if (-Not (Test-Path "Output\zed-windows-x86_64.exe")) {
+            Write-Error "Installer not found at Output\zed-windows-x86_64.exe"
+            exit 1
+          }
+          Write-Output "Installer found: Output\zed-windows-x86_64.exe"
+      # Determine release channel for tagged releases
+      - name: Determine version and release channel
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          # This exports RELEASE_CHANNEL into env (GITHUB_ENV)
+          script/determine-release-channel
+      # Upload installer as artifact for PRs with run-bundling label
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: contains(github.event.pull_request.labels.*.name, 'run-bundling')
+        with:
+          name: zed-${{ github.event.pull_request.head.sha || github.sha }}-windows-x86_64.exe
+          path: Output/zed-windows-x86_64.exe
+      # Upload installer to GitHub Releases for tagged builds
+      - name: Upload installer to release
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        if: ${{ !(contains(github.event.pull_request.labels.*.name, 'run-bundling')) }}
+        with:
+          draft: true
+          prerelease: ${{ env.RELEASE_CHANNEL == 'preview' }}
+          files: Output/zed-windows-x86_64.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
 
   tests_pass:
     name: Tests Pass
@@ -814,7 +996,7 @@ jobs:
     if: |
       startsWith(github.ref, 'refs/tags/v')
       && endsWith(github.ref, '-pre') && !endsWith(github.ref, '.0-pre')
-    needs: [bundle-mac, bundle-linux-x86_x64, bundle-linux-aarch64, freebsd]
+    needs: [bundle-mac, bundle-linux-x86_x64, bundle-linux-aarch64, bundle-windows-x86_64, freebsd]
     runs-on:
       - self-hosted
       - bundle
