@@ -1,0 +1,75 @@
+name: Windows Build
+
+on:
+  workflow_dispatch:            # manual “Run workflow” button
+    inputs:
+      ref:
+        description: Optional git ref to build (branch, tag or SHA)
+        required:    false
+        default:     main
+
+  workflow_call: {}             # lets other workflows re-use this one
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Windows - Clippy & Tests
+    runs-on: windows-latest                  # use GH-hosted runner
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace --all-features
+
+  bundle:
+    name: Build EXE installer
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Enable long paths
+        run: git config --system core.longpaths true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Build release executable
+        run: cargo build --release --package zed
+
+      - name: Install Inno Setup 6
+        uses: crazy-max/ghaction-chocolatey@v4
+        with:
+          args: install innosetup
+
+      - name: Create installer
+        run: >
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          .ci\zed.iss
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-windows-x86_64.exe
+          path: Output/zed-windows-x86_64.exe
