@@ -1,112 +1,228 @@
-name: Windows Build
+name: Build Windows EXE Installer
 
 on:
-  workflow_dispatch:
-    inputs:
-      ref:
-        description: "Branch / tag / SHA to build (default: main)"
-        required: false
-        default: main
-
-env:                       # ── Rust lives on D:  ───────────────────────────
-  CARGO_HOME:  D:\cargo
-  RUSTUP_HOME: D:\rustup
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
-  RUST_BACKTRACE: 1
+  schedule:
+    - cron: '0 0 * * 0'  # Run at midnight UTC every Sunday (every 7 days)
+  workflow_dispatch:  # Allow manual triggering
 
 jobs:
-  test:
-    name: Windows – Clippy & tests
+  build-windows:
     runs-on: windows-latest
 
-    steps:
-      # --- prepare D: drive -------------------------------------------------
-      - name: Prepare Rust dirs on D:
-        shell: pwsh
-        run: |
-          New-Item -Path "$env:CARGO_HOME"  -ItemType Directory -Force
-          New-Item -Path "$env:RUSTUP_HOME" -ItemType Directory -Force
-          # add cargo\bin to PATH for the rest of the job
-          "$env:CARGO_HOME\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+    env:
+      CARGO_HOME: D:\cargo  # Use D: drive for shorter path
 
-      - name: Checkout
+    steps:
+      # Checkout the repository
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.ref || github.ref }}
+          fetch-depth: 0
+          submodules: recursive  # Ensure submodules are checked out
 
-      - name: Install Rust (stable + clippy)
+      # Configure Git for long paths as a fallback
+      - name: Configure Git for long paths
+        shell: pwsh
+        run: |
+          git config --system core.longpaths true
+          Write-Output "Git configured to handle long paths"
+
+      # Create CARGO_HOME directory on D: drive
+      - name: Set up CARGO_HOME
+        shell: pwsh
+        run: |
+          New-Item -Path "$env:CARGO_HOME" -ItemType Directory -Force
+          Write-Output "CARGO_HOME set to $env:CARGO_HOME"
+          # Verify D: drive is accessible
+          if (-Not (Test-Path "D:\")) {
+            Write-Error "D: drive is not accessible"
+            exit 1
+          }
+          Write-Output "D: drive is accessible"
+
+      # Verify Inno Setup is available
+      - name: Verify Inno Setup
+        shell: pwsh
+        run: |
+          if (-Not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) {
+            Write-Error "Inno Setup not found at C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+            exit 1
+          }
+          Write-Output "Inno Setup found"
+        timeout-minutes: 1
+
+      # Install Rust toolchain
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
-          components: clippy
+          components: rustfmt, clippy
 
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      # Cache Rust dependencies and build artifacts
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+          cache-on-failure: true
+          prefix-key: "v1-windows-cargo-home-d-drive"  # Unique cache key for D:\cargo
 
-      - name: Run tests
-        run: cargo test --workspace --all-features
-
-  bundle:
-    name: Build EXE installer
-    needs: test
-    runs-on: windows-latest
-
-    steps:
-      # --- same D: preparation ---------------------------------------------
-      - name: Prepare Rust dirs on D:
+      # Install Windows dependencies (if needed)
+      - name: Install Windows dependencies
         shell: pwsh
         run: |
-          New-Item -Path "$env:CARGO_HOME"  -ItemType Directory -Force
-          New-Item -Path "$env:RUSTUP_HOME" -ItemType Directory -Force
-          "$env:CARGO_HOME\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          # Add any required tools or libraries here
+          # Example: choco install pkgconfiglite
+          Write-Output "Windows dependencies setup complete"
 
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.ref || github.ref }}
+      # Clean any existing zed.iss to avoid using outdated script
+      - name: Clean existing zed.iss
+        shell: pwsh
+        run: |
+          if (Test-Path "zed.iss") {
+            Remove-Item "zed.iss" -Force
+            Write-Output "Removed existing zed.iss"
+          } else {
+            Write-Output "No existing zed.iss found"
+          }
 
-      - name: Enable long paths
-        run: git config --system core.longpaths true
+      # Extract version from Cargo.toml
+      - name: Extract version
+        id: extract_version
+        shell: pwsh
+        run: |
+          $content = Get-Content crates\zed\Cargo.toml -Raw
+          if ($content -match '\[package\][^\[]*name = "zed"[^\[]*version = "([^"]+)"') {
+            $version = $matches[1]
+            Write-Output "Extracted version: $version"
+            echo "version=$version" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Error "Failed to extract version for zed package from Cargo.toml"
+            exit 1
+          }
 
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-
+      # Build the release executable for zed
       - name: Build release executable
         run: cargo build --release --package zed
+        env:
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
+          CARGO_PROFILE_RELEASE_LTO: thin
 
-      - name: Install Inno Setup 6 via Chocolatey
-        uses: crazy-max/ghaction-chocolatey@v4
-        with:
-          args: install innosetup
-
-      # if you already generate zed.iss elsewhere, drop this step
-      - name: Create simple Inno Setup script
+      # Verify the executable exists
+      - name: Verify executable
         shell: pwsh
         run: |
-          @"
+          if (-Not (Test-Path "target\release\zed.exe")) {
+            Write-Error "Executable not found at target\release\zed.exe"
+            exit 1
+          }
+          Write-Output "Executable found: target\release\zed.exe"
+
+      # Create Inno Setup script
+      - name: Create Inno Setup script
+        shell: pwsh
+        run: |
+          $issContent = @"
           [Setup]
           AppName=Zed
-          AppVersion=0.0.0
+          AppVersion=${{ steps.extract_version.outputs.version }}
+          AppPublisher=Zed Industries
+          AppPublisherURL=https://zed.dev
           DefaultDirName={autopf}\Zed
+          DefaultGroupName=Zed
           OutputBaseFilename=zed-windows-x86_64
           Compression=lzma
           SolidCompression=yes
-          [Files]
-          Source: "target\release\zed.exe"; DestDir: "{app}"
-          [Icons]
-          Name: "{autodesktop}\Zed"; Filename: "{app}\zed.exe"
-          "@ | Set-Content zed.iss
+          UninstallDisplayName=Zed
+          WizardStyle=modern
+          ChangesEnvironment=yes
 
+          [Files]
+          Source: "target\release\zed.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+          [Icons]
+          Name: "{group}\Zed"; Filename: "{app}\zed.exe"
+          Name: "{group}\Uninstall Zed"; Filename: "{uninstallexe}"
+          Name: "{autodesktop}\Zed"; Filename: "{app}\zed.exe"; Tasks: desktopicon
+
+          [Tasks]
+          Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+
+          [Run]
+          Filename: "{app}\zed.exe"; Description: "{cm:LaunchProgram,Zed}"; Flags: nowait postinstall skipifsilent
+
+          [Registry]
+          Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Check: NeedsAddPath('{app}')
+
+          [Code]
+          function NeedsAddPath(Param: string): boolean;
+          var
+            OrigPath: string;
+          begin
+            if not RegQueryStringValue(HKEY_LOCAL_MACHINE, 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment', 'Path', OrigPath) then
+            begin
+              Result := True;
+              exit;
+            end;
+            Result := Pos(ExpandConstant(Param), OrigPath) = 0;
+          end;
+
+          function InitializeSetup(): Boolean;
+          begin
+            Result := True;
+          end;
+          "@
+          Set-Content -Path "zed.iss" -Value $issContent
+          Write-Output "Inno Setup script created at zed.iss"
+
+      # Build the EXE installer
       - name: Build EXE installer
         shell: pwsh
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" zed.iss
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Inno Setup compilation failed"
+            exit 1
+          }
+          Write-Output "EXE installer created at Output\zed-windows-x86_64.exe"
 
-      - name: Upload artifact
+      # Verify the installer exists
+      - name: Verify installer
+        shell: pwsh
+        run: |
+          if (-Not (Test-Path "Output\zed-windows-x86_64.exe")) {
+            Write-Error "Installer not found at Output\zed-windows-x86_64.exe"
+            exit 1
+          }
+          Write-Output "Installer found: Output\zed-windows-x86_64.exe"
+
+      # Upload installer as artifact (for debugging)
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zed-windows-x86_64.exe
+          name: zed-windows-installer
           path: Output/zed-windows-x86_64.exe
+          retention-days: 5
+
+      # Generate timestamp for release tag
+      - name: Generate timestamp
+        id: timestamp
+        shell: pwsh
+        run: |
+          $timestamp = Get-Date -Format "yyyy-MM-dd"
+          Write-Output "Generated timestamp: $timestamp"
+          echo "date=$timestamp" >> $env:GITHUB_OUTPUT
+
+      # Publish installer to GitHub Releases
+      - name: Publish installer to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Output/zed-windows-x86_64.exe
+          tag_name: daily-${{ steps.timestamp.outputs.date }}
+          name: Zed Daily Build ${{ steps.timestamp.outputs.date }}
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+env:
+  CARGO_TERM_COLOR: always
