@@ -25,7 +25,7 @@ env:
 jobs:
   job_spec:
     name: Decide which jobs to run
-    if: github.repository_owner == 'zed-industries'
+    if: github.repository_owner == 'sundayglee'
     outputs:
       run_tests: ${{ steps.filter.outputs.run_tests }}
       run_license: ${{ steps.filter.outputs.run_license }}
