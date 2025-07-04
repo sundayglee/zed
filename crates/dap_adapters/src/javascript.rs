@@ -79,9 +79,9 @@ impl JsDebugAdapter {
                 let command = configuration.get("command")?.as_str()?.to_owned();
                 let mut args = shlex::split(&command)?.into_iter();
                 let program = args.next()?;
-                configuration.insert("program".to_owned(), program.into());
+                configuration.insert("runtimeExecutable".to_owned(), program.into());
                 configuration.insert(
-                    "args".to_owned(),
+                    "runtimeArgs".to_owned(),
                     args.map(Value::from).collect::<Vec<_>>().into(),
                 );
                 configuration.insert("console".to_owned(), "externalTerminal".into());
@@ -281,6 +281,10 @@ impl DebugAdapter for JsDebugAdapter {
                                     "type": "boolean",
                                     "description": "Automatically stop program after launch",
                                     "default": false
+                                },
+                                "attachSimplePort": {
+                                    "type": "number",
+                                    "description": "If set, attaches to the process via the given port. This is generally no longer necessary for Node.js programs and loses the ability to debug child processes, but can be useful in more esoteric scenarios such as with Deno and Docker launches. If set to 0, a random port will be chosen and --inspect-brk added to the launch arguments automatically."
                                 },
                                 "runtimeExecutable": {
                                     "type": ["string", "null"],
@@ -518,7 +522,11 @@ impl DebugAdapter for JsDebugAdapter {
     }
 
     fn label_for_child_session(&self, args: &StartDebuggingRequestArguments) -> Option<String> {
-        let label = args.configuration.get("name")?.as_str()?;
+        let label = args
+            .configuration
+            .get("name")?
+            .as_str()
+            .filter(|name| !name.is_empty())?;
         Some(label.to_owned())
     }
 }

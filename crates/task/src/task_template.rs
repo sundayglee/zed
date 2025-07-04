@@ -1,16 +1,16 @@
 use anyhow::{Context as _, bail};
 use collections::{HashMap, HashSet};
-use schemars::{JsonSchema, r#gen::SchemaSettings};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+use util::schemars::DefaultDenyUnknownFields;
 use util::serde::default_true;
 use util::{ResultExt, truncate_and_remove_front};
 
 use crate::{
     AttachRequest, ResolvedTask, RevealTarget, Shell, SpawnInTerminal, TaskContext, TaskId,
-    VariableName, ZED_VARIABLE_NAME_PREFIX,
-    serde_helpers::{non_empty_string_vec, non_empty_string_vec_json_schema},
+    VariableName, ZED_VARIABLE_NAME_PREFIX, serde_helpers::non_empty_string_vec,
 };
 
 /// A template definition of a Zed task to run.
@@ -61,7 +61,7 @@ pub struct TaskTemplate {
     /// Represents the tags which this template attaches to.
     /// Adding this removes this task from other UI and gives you ability to run it by tag.
     #[serde(default, deserialize_with = "non_empty_string_vec")]
-    #[schemars(schema_with = "non_empty_string_vec_json_schema")]
+    #[schemars(length(min = 1))]
     pub tags: Vec<String>,
     /// Which shell to use when spawning the task.
     #[serde(default)]
@@ -116,10 +116,10 @@ pub struct TaskTemplates(pub Vec<TaskTemplate>);
 impl TaskTemplates {
     /// Generates JSON schema of Tasks JSON template format.
     pub fn generate_json_schema() -> serde_json_lenient::Value {
-        let schema = SchemaSettings::draft07()
-            .with(|settings| settings.option_add_null_type = false)
+        let schema = schemars::generate::SchemaSettings::draft2019_09()
+            .with_transform(DefaultDenyUnknownFields)
             .into_generator()
-            .into_root_schema_for::<Self>();
+            .root_schema_for::<Self>();
 
         serde_json_lenient::to_value(schema).unwrap()
     }
