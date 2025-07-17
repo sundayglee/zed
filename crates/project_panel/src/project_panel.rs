@@ -33,6 +33,7 @@ use project::{
     Entry, EntryKind, Fs, GitEntry, GitEntryRef, GitTraversal, Project, ProjectEntryId,
     ProjectPath, Worktree, WorktreeId,
     git_store::{GitStoreEvent, git_traversal::ChildEntriesGitIter},
+    project_settings::GoToDiagnosticSeverityFilter,
     relativize_path,
 };
 use project_panel_settings::{
@@ -107,6 +108,7 @@ pub struct ProjectPanel {
     hide_scrollbar_task: Option<Task<()>>,
     diagnostics: HashMap<(WorktreeId, PathBuf), DiagnosticSeverity>,
     max_width_item_index: Option<usize>,
+    diagnostic_summary_update: Task<()>,
     // We keep track of the mouse down state on entries so we don't flash the UI
     // in case a user clicks to open a file.
     mouse_down: bool,
@@ -186,7 +188,6 @@ struct EntryDetails {
 #[derive(Debug, PartialEq, Eq, Clone)]
 struct StickyDetails {
     sticky_index: usize,
-    is_last: bool,
 }
 
 /// Permanently deletes the selected file or directory.
@@ -205,6 +206,24 @@ struct Delete {
 struct Trash {
     #[serde(default)]
     pub skip_prompt: bool,
+}
+
+/// Selects the next entry with diagnostics.
+#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = project_panel)]
+#[serde(deny_unknown_fields)]
+struct SelectNextDiagnostic {
+    #[serde(default)]
+    pub severity: GoToDiagnosticSeverityFilter,
+}
+
+/// Selects the previous entry with diagnostics.
+#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = project_panel)]
+#[serde(deny_unknown_fields)]
+struct SelectPrevDiagnostic {
+    #[serde(default)]
+    pub severity: GoToDiagnosticSeverityFilter,
 }
 
 actions!(
@@ -256,10 +275,6 @@ actions!(
         SelectNextGitEntry,
         /// Selects the previous entry with git changes.
         SelectPrevGitEntry,
-        /// Selects the next entry with diagnostics.
-        SelectNextDiagnostic,
-        /// Selects the previous entry with diagnostics.
-        SelectPrevDiagnostic,
         /// Selects the next directory.
         SelectNextDirectory,
         /// Selects the previous directory.
@@ -303,6 +318,33 @@ pub fn init(cx: &mut App) {
                 panel.update(cx, |panel, cx| {
                     panel.collapse_all_entries(action, window, cx);
                 });
+            }
+        });
+
+        workspace.register_action(|workspace, action: &Rename, window, cx| {
+            if let Some(panel) = workspace.panel::<ProjectPanel>(cx) {
+                panel.update(cx, |panel, cx| {
+                    if let Some(first_marked) = panel.marked_entries.first() {
+                        let first_marked = *first_marked;
+                        panel.marked_entries.clear();
+                        panel.selection = Some(first_marked);
+                    }
+                    panel.rename(action, window, cx);
+                });
+            }
+        });
+
+        workspace.register_action(|workspace, action: &Duplicate, window, cx| {
+            if let Some(panel) = workspace.panel::<ProjectPanel>(cx) {
+                panel.update(cx, |panel, cx| {
+                    panel.duplicate(action, window, cx);
+                });
+            }
+        });
+
+        workspace.register_action(|workspace, action: &Delete, window, cx| {
+            if let Some(panel) = workspace.panel::<ProjectPanel>(cx) {
+                panel.update(cx, |panel, cx| panel.delete(action, window, cx));
             }
         });
     })
@@ -406,8 +448,16 @@ impl ProjectPanel {
                 | project::Event::DiagnosticsUpdated { .. } => {
                     if ProjectPanelSettings::get_global(cx).show_diagnostics != ShowDiagnostics::Off
                     {
-                        this.update_diagnostics(cx);
-                        cx.notify();
+                        this.diagnostic_summary_update = cx.spawn(async move |this, cx| {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(30))
+                                .await;
+                            this.update(cx, |this, cx| {
+                                this.update_diagnostics(cx);
+                                cx.notify();
+                            })
+                            .log_err();
+                        });
                     }
                 }
                 project::Event::WorktreeRemoved(id) => {
@@ -550,6 +600,7 @@ impl ProjectPanel {
                     .parent_entity(&cx.entity()),
                 max_width_item_index: None,
                 diagnostics: Default::default(),
+                diagnostic_summary_update: Task::ready(()),
                 scroll_handle,
                 mouse_down: false,
                 hover_expand_task: None,
@@ -1955,7 +2006,7 @@ impl ProjectPanel {
 
     fn select_prev_diagnostic(
         &mut self,
-        _: &SelectPrevDiagnostic,
+        action: &SelectPrevDiagnostic,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1974,7 +2025,8 @@ impl ProjectPanel {
                     && entry.is_file()
                     && self
                         .diagnostics
-                        .contains_key(&(worktree_id, entry.path.to_path_buf()))
+                        .get(&(worktree_id, entry.path.to_path_buf()))
+                        .is_some_and(|severity| action.severity.matches(*severity))
             },
             cx,
         );
@@ -1990,7 +2042,7 @@ impl ProjectPanel {
 
     fn select_next_diagnostic(
         &mut self,
-        _: &SelectNextDiagnostic,
+        action: &SelectNextDiagnostic,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2009,7 +2061,8 @@ impl ProjectPanel {
                     && entry.is_file()
                     && self
                         .diagnostics
-                        .contains_key(&(worktree_id, entry.path.to_path_buf()))
+                        .get(&(worktree_id, entry.path.to_path_buf()))
+                        .is_some_and(|severity| action.severity.matches(*severity))
             },
             cx,
         );
@@ -3938,29 +3991,6 @@ impl ProjectPanel {
             }
         };
 
-        let show_sticky_shadow = details.sticky.as_ref().map_or(false, |item| {
-            if item.is_last {
-                let is_scrollable = self.scroll_handle.is_scrollable();
-                let is_scrolled = self.scroll_handle.offset().y < px(0.);
-                is_scrollable && is_scrolled
-            } else {
-                false
-            }
-        });
-        let shadow_color_top = hsla(0.0, 0.0, 0.0, 0.1);
-        let shadow_color_bottom = hsla(0.0, 0.0, 0.0, 0.);
-        let sticky_shadow = div()
-            .absolute()
-            .left_0()
-            .bottom_neg_1p5()
-            .h_1p5()
-            .w_full()
-            .bg(linear_gradient(
-                0.,
-                linear_color_stop(shadow_color_top, 1.),
-                linear_color_stop(shadow_color_bottom, 0.),
-            ));
-
         let id: ElementId = if is_sticky {
             SharedString::from(format!("project_panel_sticky_item_{}", entry_id.to_usize())).into()
         } else {
@@ -3978,7 +4008,6 @@ impl ProjectPanel {
             .border_r_2()
             .border_color(border_color)
             .hover(|style| style.bg(bg_hover_color).border_color(border_hover_color))
-            .when(show_sticky_shadow, |this| this.child(sticky_shadow))
             .when(is_sticky, |this| {
                 this.block_mouse_except_scroll()
             })
@@ -4944,7 +4973,6 @@ impl ProjectPanel {
                     .unwrap_or_default();
                 let sticky_details = Some(StickyDetails {
                     sticky_index: index,
-                    is_last: index == last_item_index,
                 });
                 let details = self.details_for_entry(
                     entry,
@@ -4956,7 +4984,24 @@ impl ProjectPanel {
                     window,
                     cx,
                 );
-                self.render_entry(entry.id, details, window, cx).into_any()
+                self.render_entry(entry.id, details, window, cx)
+                    .when(index == last_item_index, |this| {
+                        let shadow_color_top = hsla(0.0, 0.0, 0.0, 0.1);
+                        let shadow_color_bottom = hsla(0.0, 0.0, 0.0, 0.);
+                        let sticky_shadow = div()
+                            .absolute()
+                            .left_0()
+                            .bottom_neg_1p5()
+                            .h_1p5()
+                            .w_full()
+                            .bg(linear_gradient(
+                                0.,
+                                linear_color_stop(shadow_color_top, 1.),
+                                linear_color_stop(shadow_color_bottom, 0.),
+                            ));
+                        this.child(sticky_shadow)
+                    })
+                    .into_any()
             })
             .collect()
     }
@@ -4990,7 +5035,16 @@ impl Render for ProjectPanel {
         let indent_size = ProjectPanelSettings::get_global(cx).indent_size;
         let show_indent_guides =
             ProjectPanelSettings::get_global(cx).indent_guides.show == ShowIndentGuides::Always;
-        let show_sticky_scroll = ProjectPanelSettings::get_global(cx).sticky_scroll;
+        let show_sticky_entries = {
+            if ProjectPanelSettings::get_global(cx).sticky_scroll {
+                let is_scrollable = self.scroll_handle.is_scrollable();
+                let is_scrolled = self.scroll_handle.offset().y < px(0.);
+                is_scrollable && is_scrolled
+            } else {
+                false
+            }
+        };
+
         let is_local = project.is_local();
 
         if has_worktree {
@@ -5282,7 +5336,7 @@ impl Render for ProjectPanel {
                                 }),
                         )
                     })
-                    .when(show_sticky_scroll, |list| {
+                    .when(show_sticky_entries, |list| {
                         let sticky_items = ui::sticky_items(
                             cx.entity().clone(),
                             |this, range, window, cx| {
