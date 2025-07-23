@@ -12,6 +12,7 @@ use crate::{
 use agent_settings::AgentSettings;
 use anyhow::Context as _;
 use askpass::AskPassDelegate;
+use client::DisableAiSettings;
 use db::kvp::KEY_VALUE_STORE;
 use editor::{
     Editor, EditorElement, EditorMode, EditorSettings, MultiBuffer, ShowScrollbar,
@@ -53,7 +54,7 @@ use project::{
     git_store::{GitStoreEvent, Repository},
 };
 use serde::{Deserialize, Serialize};
-use settings::{Settings as _, SettingsStore};
+use settings::{Settings, SettingsStore};
 use std::future::Future;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -65,6 +66,7 @@ use ui::{
     ScrollbarState, SplitButton, Tooltip, prelude::*,
 };
 use util::{ResultExt, TryFutureExt, maybe};
+use workspace::SERIALIZATION_THROTTLE_TIME;
 
 use workspace::{
     Workspace,
@@ -342,7 +344,7 @@ pub struct GitPanel {
     pending_commit: Option<Task<()>>,
     amend_pending: bool,
     signoff_enabled: bool,
-    pending_serialization: Task<Option<()>>,
+    pending_serialization: Task<()>,
     pub(crate) project: Entity<Project>,
     scroll_handle: UniformListScrollHandle,
     max_width_item_index: Option<usize>,
@@ -463,9 +465,14 @@ impl GitPanel {
             };
 
             let mut assistant_enabled = AgentSettings::get_global(cx).enabled;
+            let mut was_ai_disabled = DisableAiSettings::get_global(cx).disable_ai;
             let _settings_subscription = cx.observe_global::<SettingsStore>(move |_, cx| {
-                if assistant_enabled != AgentSettings::get_global(cx).enabled {
+                let is_ai_disabled = DisableAiSettings::get_global(cx).disable_ai;
+                if assistant_enabled != AgentSettings::get_global(cx).enabled
+                    || was_ai_disabled != is_ai_disabled
+                {
                     assistant_enabled = AgentSettings::get_global(cx).enabled;
+                    was_ai_disabled = is_ai_disabled;
                     cx.notify();
                 }
             });
@@ -518,7 +525,7 @@ impl GitPanel {
                 pending_commit: None,
                 amend_pending: false,
                 signoff_enabled: false,
-                pending_serialization: Task::ready(None),
+                pending_serialization: Task::ready(()),
                 single_staged_entry: None,
                 single_tracked_entry: None,
                 project,
@@ -709,31 +716,41 @@ impl GitPanel {
         let amend_pending = self.amend_pending;
         let signoff_enabled = self.signoff_enabled;
 
-        let Some(serialization_key) = self
-            .workspace
-            .read_with(cx, |workspace, _| Self::serialization_key(workspace))
-            .ok()
-            .flatten()
-        else {
-            return;
-        };
-
-        self.pending_serialization = cx.background_spawn(
-            async move {
-                KEY_VALUE_STORE
-                    .write_kvp(
-                        serialization_key,
-                        serde_json::to_string(&SerializedGitPanel {
-                            width,
-                            amend_pending,
-                            signoff_enabled,
-                        })?,
-                    )
-                    .await?;
-                anyhow::Ok(())
-            }
-            .log_err(),
-        );
+        self.pending_serialization = cx.spawn(async move |git_panel, cx| {
+            cx.background_executor()
+                .timer(SERIALIZATION_THROTTLE_TIME)
+                .await;
+            let Some(serialization_key) = git_panel
+                .update(cx, |git_panel, cx| {
+                    git_panel
+                        .workspace
+                        .read_with(cx, |workspace, _| Self::serialization_key(workspace))
+                        .ok()
+                        .flatten()
+                })
+                .ok()
+                .flatten()
+            else {
+                return;
+            };
+            cx.background_spawn(
+                async move {
+                    KEY_VALUE_STORE
+                        .write_kvp(
+                            serialization_key,
+                            serde_json::to_string(&SerializedGitPanel {
+                                width,
+                                amend_pending,
+                                signoff_enabled,
+                            })?,
+                        )
+                        .await?;
+                    anyhow::Ok(())
+                }
+                .log_err(),
+            )
+            .await;
+        });
     }
 
     pub(crate) fn set_modal_open(&mut self, open: bool, cx: &mut Context<Self>) {
@@ -1795,7 +1812,7 @@ impl GitPanel {
 
     /// Generates a commit message using an LLM.
     pub fn generate_commit_message(&mut self, cx: &mut Context<Self>) {
-        if !self.can_commit() {
+        if !self.can_commit() || DisableAiSettings::get_global(cx).disable_ai {
             return;
         }
 
@@ -4294,8 +4311,10 @@ impl GitPanel {
 }
 
 fn current_language_model(cx: &Context<'_, GitPanel>) -> Option<Arc<dyn LanguageModel>> {
-    agent_settings::AgentSettings::get_global(cx)
-        .enabled
+    let is_enabled = agent_settings::AgentSettings::get_global(cx).enabled
+        && !DisableAiSettings::get_global(cx).disable_ai;
+
+    is_enabled
         .then(|| {
             let ConfiguredModel { provider, model } =
                 LanguageModelRegistry::read_global(cx).commit_message_model()?;
@@ -5026,6 +5045,7 @@ mod tests {
             language::init(cx);
             editor::init(cx);
             Project::init_settings(cx);
+            client::DisableAiSettings::register(cx);
             crate::init(cx);
         });
     }

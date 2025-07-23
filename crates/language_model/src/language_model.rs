@@ -116,6 +116,12 @@ pub enum LanguageModelCompletionError {
         provider: LanguageModelProviderName,
         message: String,
     },
+    #[error("{message}")]
+    UpstreamProviderError {
+        message: String,
+        status: StatusCode,
+        retry_after: Option<Duration>,
+    },
     #[error("HTTP response error from {provider}'s API: status {status_code} - {message:?}")]
     HttpResponseError {
         provider: LanguageModelProviderName,
@@ -648,7 +654,7 @@ pub enum LanguageModelProviderTosView {
     ThreadEmptyState,
     /// When there are no past interactions in the Agent Panel.
     ThreadFreshStart,
-    PromptEditorPopup,
+    TextThreadPopup,
     Configuration,
 }
 
@@ -725,6 +731,18 @@ impl From<String> for LanguageModelProviderId {
 
 impl From<String> for LanguageModelProviderName {
     fn from(value: String) -> Self {
+        Self(SharedString::from(value))
+    }
+}
+
+impl From<Arc<str>> for LanguageModelProviderId {
+    fn from(value: Arc<str>) -> Self {
+        Self(SharedString::from(value))
+    }
+}
+
+impl From<Arc<str>> for LanguageModelProviderName {
+    fn from(value: Arc<str>) -> Self {
         Self(SharedString::from(value))
     }
 }
