@@ -1,12 +1,10 @@
 use anyhow::{Context as _, bail};
-use axum::routing::put;
 use axum::{Extension, Json, Router, extract, routing::post};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use collections::{HashMap, HashSet};
 use reqwest::StatusCode;
 use sea_orm::ActiveValue;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::{str::FromStr, sync::Arc, time::Duration};
 use stripe::{
     BillingPortalSession, CancellationDetailsReason, CreateBillingPortalSession,
@@ -20,7 +18,6 @@ use stripe::{
 use util::{ResultExt, maybe};
 use zed_llm_client::LanguageModelProvider;
 
-use crate::api::events::SnowflakeRow;
 use crate::db::billing_subscription::{
     StripeCancellationReason, StripeSubscriptionStatus, SubscriptionKind,
 };
@@ -28,7 +25,7 @@ use crate::llm::db::subscription_usage_meter::{self, CompletionMode};
 use crate::rpc::{ResultExt as _, Server};
 use crate::stripe_client::{
     StripeCancellationDetailsReason, StripeClient, StripeCustomerId, StripeSubscription,
-    StripeSubscriptionId, UpdateCustomerParams,
+    StripeSubscriptionId,
 };
 use crate::{AppState, Error, Result};
 use crate::{db::UserId, llm::db::LlmDatabase};
@@ -36,15 +33,13 @@ use crate::{
     db::{
         BillingSubscriptionId, CreateBillingCustomerParams, CreateBillingSubscriptionParams,
         CreateProcessedStripeEventParams, UpdateBillingCustomerParams,
-        UpdateBillingPreferencesParams, UpdateBillingSubscriptionParams, billing_customer,
+        UpdateBillingSubscriptionParams, billing_customer,
     },
     stripe_billing::StripeBilling,
 };
 
 pub fn router() -> Router {
     Router::new()
-        .route("/billing/preferences", put(update_billing_preferences))
-        .route("/billing/subscriptions", post(create_billing_subscription))
         .route(
             "/billing/subscriptions/manage",
             post(manage_billing_subscription),
@@ -53,224 +48,6 @@ pub fn router() -> Router {
             "/billing/subscriptions/sync",
             post(sync_billing_subscription),
         )
-}
-
-#[derive(Debug, Serialize)]
-struct BillingPreferencesResponse {
-    trial_started_at: Option<String>,
-    max_monthly_llm_usage_spending_in_cents: i32,
-    model_request_overages_enabled: bool,
-    model_request_overages_spend_limit_in_cents: i32,
-}
-
-#[derive(Debug, Deserialize)]
-struct UpdateBillingPreferencesBody {
-    github_user_id: i32,
-    #[serde(default)]
-    max_monthly_llm_usage_spending_in_cents: i32,
-    #[serde(default)]
-    model_request_overages_enabled: bool,
-    #[serde(default)]
-    model_request_overages_spend_limit_in_cents: i32,
-}
-
-async fn update_billing_preferences(
-    Extension(app): Extension<Arc<AppState>>,
-    Extension(rpc_server): Extension<Arc<crate::rpc::Server>>,
-    extract::Json(body): extract::Json<UpdateBillingPreferencesBody>,
-) -> Result<Json<BillingPreferencesResponse>> {
-    let user = app
-        .db
-        .get_user_by_github_user_id(body.github_user_id)
-        .await?
-        .context("user not found")?;
-
-    let billing_customer = app.db.get_billing_customer_by_user_id(user.id).await?;
-
-    let max_monthly_llm_usage_spending_in_cents =
-        body.max_monthly_llm_usage_spending_in_cents.max(0);
-    let model_request_overages_spend_limit_in_cents =
-        body.model_request_overages_spend_limit_in_cents.max(0);
-
-    let billing_preferences =
-        if let Some(_billing_preferences) = app.db.get_billing_preferences(user.id).await? {
-            app.db
-                .update_billing_preferences(
-                    user.id,
-                    &UpdateBillingPreferencesParams {
-                        max_monthly_llm_usage_spending_in_cents: ActiveValue::set(
-                            max_monthly_llm_usage_spending_in_cents,
-                        ),
-                        model_request_overages_enabled: ActiveValue::set(
-                            body.model_request_overages_enabled,
-                        ),
-                        model_request_overages_spend_limit_in_cents: ActiveValue::set(
-                            model_request_overages_spend_limit_in_cents,
-                        ),
-                    },
-                )
-                .await?
-        } else {
-            app.db
-                .create_billing_preferences(
-                    user.id,
-                    &crate::db::CreateBillingPreferencesParams {
-                        max_monthly_llm_usage_spending_in_cents,
-                        model_request_overages_enabled: body.model_request_overages_enabled,
-                        model_request_overages_spend_limit_in_cents,
-                    },
-                )
-                .await?
-        };
-
-    SnowflakeRow::new(
-        "Billing Preferences Updated",
-        Some(user.metrics_id),
-        user.admin,
-        None,
-        json!({
-            "user_id": user.id,
-            "model_request_overages_enabled": billing_preferences.model_request_overages_enabled,
-            "model_request_overages_spend_limit_in_cents": billing_preferences.model_request_overages_spend_limit_in_cents,
-            "max_monthly_llm_usage_spending_in_cents": billing_preferences.max_monthly_llm_usage_spending_in_cents,
-        }),
-    )
-    .write(&app.kinesis_client, &app.config.kinesis_stream)
-    .await
-    .log_err();
-
-    rpc_server.refresh_llm_tokens_for_user(user.id).await;
-
-    Ok(Json(BillingPreferencesResponse {
-        trial_started_at: billing_customer
-            .and_then(|billing_customer| billing_customer.trial_started_at)
-            .map(|trial_started_at| {
-                trial_started_at
-                    .and_utc()
-                    .to_rfc3339_opts(SecondsFormat::Millis, true)
-            }),
-        max_monthly_llm_usage_spending_in_cents: billing_preferences
-            .max_monthly_llm_usage_spending_in_cents,
-        model_request_overages_enabled: billing_preferences.model_request_overages_enabled,
-        model_request_overages_spend_limit_in_cents: billing_preferences
-            .model_request_overages_spend_limit_in_cents,
-    }))
-}
-
-#[derive(Debug, PartialEq, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ProductCode {
-    ZedPro,
-    ZedProTrial,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateBillingSubscriptionBody {
-    github_user_id: i32,
-    product: ProductCode,
-}
-
-#[derive(Debug, Serialize)]
-struct CreateBillingSubscriptionResponse {
-    checkout_session_url: String,
-}
-
-/// Initiates a Stripe Checkout session for creating a billing subscription.
-async fn create_billing_subscription(
-    Extension(app): Extension<Arc<AppState>>,
-    extract::Json(body): extract::Json<CreateBillingSubscriptionBody>,
-) -> Result<Json<CreateBillingSubscriptionResponse>> {
-    let user = app
-        .db
-        .get_user_by_github_user_id(body.github_user_id)
-        .await?
-        .context("user not found")?;
-
-    let Some(stripe_billing) = app.stripe_billing.clone() else {
-        log::error!("failed to retrieve Stripe billing object");
-        Err(Error::http(
-            StatusCode::NOT_IMPLEMENTED,
-            "not supported".into(),
-        ))?
-    };
-
-    if let Some(existing_subscription) = app.db.get_active_billing_subscription(user.id).await? {
-        let is_checkout_allowed = body.product == ProductCode::ZedProTrial
-            && existing_subscription.kind == Some(SubscriptionKind::ZedFree);
-
-        if !is_checkout_allowed {
-            return Err(Error::http(
-                StatusCode::CONFLICT,
-                "user already has an active subscription".into(),
-            ));
-        }
-    }
-
-    let existing_billing_customer = app.db.get_billing_customer_by_user_id(user.id).await?;
-    if let Some(existing_billing_customer) = &existing_billing_customer {
-        if existing_billing_customer.has_overdue_invoices {
-            return Err(Error::http(
-                StatusCode::PAYMENT_REQUIRED,
-                "user has overdue invoices".into(),
-            ));
-        }
-    }
-
-    let customer_id = if let Some(existing_customer) = &existing_billing_customer {
-        let customer_id = StripeCustomerId(existing_customer.stripe_customer_id.clone().into());
-        if let Some(email) = user.email_address.as_deref() {
-            stripe_billing
-                .client()
-                .update_customer(&customer_id, UpdateCustomerParams { email: Some(email) })
-                .await
-                // Update of email address is best-effort - continue checkout even if it fails
-                .context("error updating stripe customer email address")
-                .log_err();
-        }
-        customer_id
-    } else {
-        stripe_billing
-            .find_or_create_customer_by_email(user.email_address.as_deref())
-            .await?
-    };
-
-    let success_url = format!(
-        "{}/account?checkout_complete=1",
-        app.config.zed_dot_dev_url()
-    );
-
-    let checkout_session_url = match body.product {
-        ProductCode::ZedPro => {
-            stripe_billing
-                .checkout_with_zed_pro(&customer_id, &user.github_login, &success_url)
-                .await?
-        }
-        ProductCode::ZedProTrial => {
-            if let Some(existing_billing_customer) = &existing_billing_customer {
-                if existing_billing_customer.trial_started_at.is_some() {
-                    return Err(Error::http(
-                        StatusCode::FORBIDDEN,
-                        "user already used free trial".into(),
-                    ));
-                }
-            }
-
-            let feature_flags = app.db.get_user_flags(user.id).await?;
-
-            stripe_billing
-                .checkout_with_zed_pro_trial(
-                    &customer_id,
-                    &user.github_login,
-                    feature_flags,
-                    &success_url,
-                )
-                .await?
-        }
-    };
-
-    Ok(Json(CreateBillingSubscriptionResponse {
-        checkout_session_url,
-    }))
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
