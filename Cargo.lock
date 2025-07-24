@@ -347,6 +347,7 @@ dependencies = [
  "proto",
  "serde",
  "smallvec",
+ "telemetry",
  "ui",
  "workspace-hack",
  "zed_actions",
@@ -9018,6 +9019,7 @@ dependencies = [
  "task",
  "text",
  "theme",
+ "toml 0.8.20",
  "tree-sitter",
  "tree-sitter-elixir",
  "tree-sitter-embedded-template",
@@ -14778,6 +14780,7 @@ dependencies = [
  "fs",
  "fuzzy",
  "gpui",
+ "itertools 0.14.0",
  "language",
  "log",
  "menu",
@@ -20166,7 +20169,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "0.197.0"
+version = "0.198.0"
 dependencies = [
  "activity_indicator",
  "agent",
@@ -20207,6 +20210,7 @@ dependencies = [
  "extension",
  "extension_host",
  "extensions_ui",
+ "feature_flags",
  "feedback",
  "file_finder",
  "fs",
