@@ -76,6 +76,7 @@ impl registry::ContextServerDescriptor for ContextServerDescriptor {
                     .path_from_extension(command_path)
                     .to_string_lossy()
                     .to_string()
+                    .into() // Convert String to PathBuf
             };
 
             // Process arguments to resolve any paths.
@@ -123,8 +124,7 @@ impl registry::ContextServerDescriptor for ContextServerDescriptor {
 
             Ok(ContextServerCommand {
                 path: command.command,
-                args: command.args,
-                args,
+                args, // Use the processed args
                 env: Some(command.env.into_iter().collect()),
             })
         })
