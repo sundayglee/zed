@@ -21,10 +21,10 @@ use editor::{
 use file_icons::FileIcons;
 use gpui::{
     Action, Animation, AnimationExt, App, BorderStyle, EdgesRefinement, Empty, Entity, EntityId,
-    FocusHandle, Focusable, Hsla, Length, ListOffset, ListState, PlatformDisplay, SharedString,
-    StyleRefinement, Subscription, Task, TextStyle, TextStyleRefinement, Transformation,
-    UnderlineStyle, WeakEntity, Window, WindowHandle, div, linear_color_stop, linear_gradient,
-    list, percentage, point, prelude::*, pulsating_between,
+    FocusHandle, Focusable, Hsla, Length, ListOffset, ListState, MouseButton, PlatformDisplay,
+    SharedString, Stateful, StyleRefinement, Subscription, Task, TextStyle, TextStyleRefinement,
+    Transformation, UnderlineStyle, WeakEntity, Window, WindowHandle, div, linear_color_stop,
+    linear_gradient, list, percentage, point, prelude::*, pulsating_between,
 };
 use language::language_settings::SoftWrap;
 use language::{Buffer, Language};
@@ -34,7 +34,9 @@ use project::Project;
 use settings::Settings as _;
 use text::{Anchor, BufferSnapshot};
 use theme::ThemeSettings;
-use ui::{Disclosure, Divider, DividerColor, KeyBinding, Tooltip, prelude::*};
+use ui::{
+    Disclosure, Divider, DividerColor, KeyBinding, Scrollbar, ScrollbarState, Tooltip, prelude::*,
+};
 use util::ResultExt;
 use workspace::{CollaboratorId, Workspace};
 use zed_actions::agent::{Chat, NextHistoryMessage, PreviousHistoryMessage};
@@ -69,6 +71,7 @@ pub struct AcpThreadView {
     notification_subscriptions: HashMap<WindowHandle<AgentNotification>, Vec<Subscription>>,
     last_error: Option<Entity<Markdown>>,
     list_state: ListState,
+    scrollbar_state: ScrollbarState,
     auth_task: Option<Task<()>>,
     expanded_tool_calls: HashSet<acp::ToolCallId>,
     expanded_thinking_blocks: HashSet<(usize, usize)>,
@@ -187,7 +190,8 @@ impl AcpThreadView {
             notifications: Vec::new(),
             notification_subscriptions: HashMap::default(),
             diff_editors: Default::default(),
-            list_state: list_state,
+            list_state: list_state.clone(),
+            scrollbar_state: ScrollbarState::new(list_state).parent_entity(&cx.entity()),
             last_error: None,
             auth_task: None,
             expanded_tool_calls: HashSet::default(),
@@ -854,6 +858,7 @@ impl AcpThreadView {
                     .into_any()
             }
             AgentThreadEntry::ToolCall(tool_call) => div()
+                .w_full()
                 .py_1p5()
                 .px_5()
                 .child(self.render_tool_call(index, tool_call, window, cx))
@@ -866,6 +871,7 @@ impl AcpThreadView {
         let is_generating = matches!(thread.read(cx).status(), ThreadStatus::Generating);
         if index == total_entries - 1 && !is_generating {
             v_flex()
+                .w_full()
                 .child(primary)
                 .child(self.render_thread_controls(cx))
                 .into_any_element()
@@ -898,6 +904,7 @@ impl AcpThreadView {
         cx: &Context<Self>,
     ) -> AnyElement {
         let header_id = SharedString::from(format!("thinking-block-header-{}", entry_ix));
+        let card_header_id = SharedString::from("inner-card-header");
         let key = (entry_ix, chunk_ix);
         let is_open = self.expanded_thinking_blocks.contains(&key);
 
@@ -905,41 +912,53 @@ impl AcpThreadView {
             .child(
                 h_flex()
                     .id(header_id)
-                    .group("disclosure-header")
+                    .group(&card_header_id)
+                    .relative()
                     .w_full()
-                    .justify_between()
+                    .gap_1p5()
                     .opacity(0.8)
                     .hover(|style| style.opacity(1.))
                     .child(
                         h_flex()
-                            .gap_1p5()
-                            .child(
-                                Icon::new(IconName::ToolBulb)
-                                    .size(IconSize::Small)
-                                    .color(Color::Muted),
-                            )
+                            .size_4()
+                            .justify_center()
                             .child(
                                 div()
-                                    .text_size(self.tool_name_font_size())
-                                    .child("Thinking"),
+                                    .group_hover(&card_header_id, |s| s.invisible().w_0())
+                                    .child(
+                                        Icon::new(IconName::ToolThink)
+                                            .size(IconSize::Small)
+                                            .color(Color::Muted),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .absolute()
+                                    .inset_0()
+                                    .invisible()
+                                    .justify_center()
+                                    .group_hover(&card_header_id, |s| s.visible())
+                                    .child(
+                                        Disclosure::new(("expand", entry_ix), is_open)
+                                            .opened_icon(IconName::ChevronUp)
+                                            .closed_icon(IconName::ChevronRight)
+                                            .on_click(cx.listener({
+                                                move |this, _event, _window, cx| {
+                                                    if is_open {
+                                                        this.expanded_thinking_blocks.remove(&key);
+                                                    } else {
+                                                        this.expanded_thinking_blocks.insert(key);
+                                                    }
+                                                    cx.notify();
+                                                }
+                                            })),
+                                    ),
                             ),
                     )
                     .child(
-                        div().visible_on_hover("disclosure-header").child(
-                            Disclosure::new("thinking-disclosure", is_open)
-                                .opened_icon(IconName::ChevronUp)
-                                .closed_icon(IconName::ChevronDown)
-                                .on_click(cx.listener({
-                                    move |this, _event, _window, cx| {
-                                        if is_open {
-                                            this.expanded_thinking_blocks.remove(&key);
-                                        } else {
-                                            this.expanded_thinking_blocks.insert(key);
-                                        }
-                                        cx.notify();
-                                    }
-                                })),
-                        ),
+                        div()
+                            .text_size(self.tool_name_font_size())
+                            .child("Thinking"),
                     )
                     .on_click(cx.listener({
                         move |this, _event, _window, cx| {
@@ -970,6 +989,67 @@ impl AcpThreadView {
             .into_any_element()
     }
 
+    fn render_tool_call_icon(
+        &self,
+        group_name: SharedString,
+        entry_ix: usize,
+        is_collapsible: bool,
+        is_open: bool,
+        tool_call: &ToolCall,
+        cx: &Context<Self>,
+    ) -> Div {
+        let tool_icon = Icon::new(match tool_call.kind {
+            acp::ToolKind::Read => IconName::ToolRead,
+            acp::ToolKind::Edit => IconName::ToolPencil,
+            acp::ToolKind::Delete => IconName::ToolDeleteFile,
+            acp::ToolKind::Move => IconName::ArrowRightLeft,
+            acp::ToolKind::Search => IconName::ToolSearch,
+            acp::ToolKind::Execute => IconName::ToolTerminal,
+            acp::ToolKind::Think => IconName::ToolThink,
+            acp::ToolKind::Fetch => IconName::ToolWeb,
+            acp::ToolKind::Other => IconName::ToolHammer,
+        })
+        .size(IconSize::Small)
+        .color(Color::Muted);
+
+        if is_collapsible {
+            h_flex()
+                .size_4()
+                .justify_center()
+                .child(
+                    div()
+                        .group_hover(&group_name, |s| s.invisible().w_0())
+                        .child(tool_icon),
+                )
+                .child(
+                    h_flex()
+                        .absolute()
+                        .inset_0()
+                        .invisible()
+                        .justify_center()
+                        .group_hover(&group_name, |s| s.visible())
+                        .child(
+                            Disclosure::new(("expand", entry_ix), is_open)
+                                .opened_icon(IconName::ChevronUp)
+                                .closed_icon(IconName::ChevronRight)
+                                .on_click(cx.listener({
+                                    let id = tool_call.id.clone();
+                                    move |this: &mut Self, _, _, cx: &mut Context<Self>| {
+                                        if is_open {
+                                            this.expanded_tool_calls.remove(&id);
+                                        } else {
+                                            this.expanded_tool_calls.insert(id.clone());
+                                        }
+                                        cx.notify();
+                                    }
+                                })),
+                        ),
+                )
+        } else {
+            div().child(tool_icon)
+        }
+    }
+
     fn render_tool_call(
         &self,
         entry_ix: usize,
@@ -977,7 +1057,8 @@ impl AcpThreadView {
         window: &Window,
         cx: &Context<Self>,
     ) -> Div {
-        let header_id = SharedString::from(format!("tool-call-header-{}", entry_ix));
+        let header_id = SharedString::from(format!("outer-tool-call-header-{}", entry_ix));
+        let card_header_id = SharedString::from("inner-tool-call-header");
 
         let status_icon = match &tool_call.status {
             ToolCallStatus::Allowed {
@@ -1026,6 +1107,21 @@ impl AcpThreadView {
         let is_collapsible = !tool_call.content.is_empty() && !needs_confirmation;
         let is_open = !is_collapsible || self.expanded_tool_calls.contains(&tool_call.id);
 
+        let gradient_color = cx.theme().colors().panel_background;
+        let gradient_overlay = {
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .w_12()
+                .h_full()
+                .bg(linear_gradient(
+                    90.,
+                    linear_color_stop(gradient_color, 1.),
+                    linear_color_stop(gradient_color.opacity(0.2), 0.),
+                ))
+        };
+
         v_flex()
             .when(needs_confirmation, |this| {
                 this.rounded_lg()
@@ -1042,43 +1138,38 @@ impl AcpThreadView {
                     .justify_between()
                     .map(|this| {
                         if needs_confirmation {
-                            this.px_2()
+                            this.pl_2()
+                                .pr_1()
                                 .py_1()
                                 .rounded_t_md()
-                                .bg(self.tool_card_header_bg(cx))
                                 .border_b_1()
                                 .border_color(self.tool_card_border_color(cx))
+                                .bg(self.tool_card_header_bg(cx))
                         } else {
                             this.opacity(0.8).hover(|style| style.opacity(1.))
                         }
                     })
                     .child(
                         h_flex()
-                            .id("tool-call-header")
-                            .overflow_x_scroll()
+                            .group(&card_header_id)
+                            .relative()
+                            .w_full()
                             .map(|this| {
-                                if needs_confirmation {
-                                    this.text_xs()
+                                if tool_call.locations.len() == 1 {
+                                    this.gap_0()
                                 } else {
-                                    this.text_size(self.tool_name_font_size())
+                                    this.gap_1p5()
                                 }
                             })
-                            .gap_1p5()
-                            .child(
-                                Icon::new(match tool_call.kind {
-                                    acp::ToolKind::Read => IconName::ToolRead,
-                                    acp::ToolKind::Edit => IconName::ToolPencil,
-                                    acp::ToolKind::Delete => IconName::ToolDeleteFile,
-                                    acp::ToolKind::Move => IconName::ArrowRightLeft,
-                                    acp::ToolKind::Search => IconName::ToolSearch,
-                                    acp::ToolKind::Execute => IconName::ToolTerminal,
-                                    acp::ToolKind::Think => IconName::ToolBulb,
-                                    acp::ToolKind::Fetch => IconName::ToolWeb,
-                                    acp::ToolKind::Other => IconName::ToolHammer,
-                                })
-                                .size(IconSize::Small)
-                                .color(Color::Muted),
-                            )
+                            .text_size(self.tool_name_font_size())
+                            .child(self.render_tool_call_icon(
+                                card_header_id,
+                                entry_ix,
+                                is_collapsible,
+                                is_open,
+                                tool_call,
+                                cx,
+                            ))
                             .child(if tool_call.locations.len() == 1 {
                                 let name = tool_call.locations[0]
                                     .path
@@ -1089,13 +1180,11 @@ impl AcpThreadView {
 
                                 h_flex()
                                     .id(("open-tool-call-location", entry_ix))
-                                    .child(name)
                                     .w_full()
                                     .max_w_full()
-                                    .pr_1()
-                                    .gap_0p5()
-                                    .cursor_pointer()
+                                    .px_1p5()
                                     .rounded_sm()
+                                    .overflow_x_scroll()
                                     .opacity(0.8)
                                     .hover(|label| {
                                         label.opacity(1.).bg(cx
@@ -1104,53 +1193,49 @@ impl AcpThreadView {
                                             .element_hover
                                             .opacity(0.5))
                                     })
+                                    .child(name)
                                     .tooltip(Tooltip::text("Jump to File"))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.open_tool_call_location(entry_ix, 0, window, cx);
                                     }))
                                     .into_any_element()
                             } else {
-                                self.render_markdown(
-                                    tool_call.label.clone(),
-                                    default_markdown_style(needs_confirmation, window, cx),
-                                )
-                                .into_any()
+                                h_flex()
+                                    .id("non-card-label-container")
+                                    .w_full()
+                                    .relative()
+                                    .overflow_hidden()
+                                    .child(
+                                        h_flex()
+                                            .id("non-card-label")
+                                            .pr_8()
+                                            .w_full()
+                                            .overflow_x_scroll()
+                                            .child(self.render_markdown(
+                                                tool_call.label.clone(),
+                                                default_markdown_style(
+                                                    needs_confirmation,
+                                                    window,
+                                                    cx,
+                                                ),
+                                            )),
+                                    )
+                                    .child(gradient_overlay)
+                                    .on_click(cx.listener({
+                                        let id = tool_call.id.clone();
+                                        move |this: &mut Self, _, _, cx: &mut Context<Self>| {
+                                            if is_open {
+                                                this.expanded_tool_calls.remove(&id);
+                                            } else {
+                                                this.expanded_tool_calls.insert(id.clone());
+                                            }
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .into_any()
                             }),
                     )
-                    .child(
-                        h_flex()
-                            .gap_0p5()
-                            .when(is_collapsible, |this| {
-                                this.child(
-                                    Disclosure::new(("expand", entry_ix), is_open)
-                                        .opened_icon(IconName::ChevronUp)
-                                        .closed_icon(IconName::ChevronDown)
-                                        .on_click(cx.listener({
-                                            let id = tool_call.id.clone();
-                                            move |this: &mut Self, _, _, cx: &mut Context<Self>| {
-                                                if is_open {
-                                                    this.expanded_tool_calls.remove(&id);
-                                                } else {
-                                                    this.expanded_tool_calls.insert(id.clone());
-                                                }
-                                                cx.notify();
-                                            }
-                                        })),
-                                )
-                            })
-                            .children(status_icon),
-                    )
-                    .on_click(cx.listener({
-                        let id = tool_call.id.clone();
-                        move |this: &mut Self, _, _, cx: &mut Context<Self>| {
-                            if is_open {
-                                this.expanded_tool_calls.remove(&id);
-                            } else {
-                                this.expanded_tool_calls.insert(id.clone());
-                            }
-                            cx.notify();
-                        }
-                    })),
+                    .children(status_icon),
             )
             .when(is_open, |this| {
                 this.child(
@@ -1244,8 +1329,7 @@ impl AcpThreadView {
         cx: &Context<Self>,
     ) -> Div {
         h_flex()
-            .py_1p5()
-            .px_1p5()
+            .p_1p5()
             .gap_1()
             .justify_end()
             .when(!empty_content, |this| {
@@ -1271,6 +1355,7 @@ impl AcpThreadView {
                     })
                     .icon_position(IconPosition::Start)
                     .icon_size(IconSize::XSmall)
+                    .label_size(LabelSize::Small)
                     .on_click(cx.listener({
                         let tool_call_id = tool_call_id.clone();
                         let option_id = option.id.clone();
@@ -1520,7 +1605,7 @@ impl AcpThreadView {
                     })
             })
             .when(!changed_buffers.is_empty(), |this| {
-                this.child(Divider::horizontal())
+                this.child(Divider::horizontal().color(DividerColor::Border))
                     .child(self.render_edits_summary(
                         action_log,
                         &changed_buffers,
@@ -1550,6 +1635,7 @@ impl AcpThreadView {
         {
             h_flex()
                 .w_full()
+                .cursor_default()
                 .gap_1()
                 .text_xs()
                 .text_color(cx.theme().colors().text_muted)
@@ -1579,7 +1665,7 @@ impl AcpThreadView {
             let status_label = if stats.pending == 0 {
                 "All Done".to_string()
             } else if stats.completed == 0 {
-                format!("{}", plan.entries.len())
+                format!("{} Tasks", plan.entries.len())
             } else {
                 format!("{}/{}", stats.completed, plan.entries.len())
             };
@@ -1693,7 +1779,6 @@ impl AcpThreadView {
             .child(
                 h_flex()
                     .id("edits-container")
-                    .cursor_pointer()
                     .w_full()
                     .gap_1()
                     .child(Disclosure::new("edits-disclosure", expanded))
@@ -2468,6 +2553,7 @@ impl AcpThreadView {
             }));
 
         h_flex()
+            .w_full()
             .mr_1()
             .pb_2()
             .px(RESPONSE_PADDING_X)
@@ -2477,6 +2563,39 @@ impl AcpThreadView {
             .justify_end()
             .child(open_as_markdown)
             .child(scroll_to_top)
+    }
+
+    fn render_vertical_scrollbar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id("acp-thread-scrollbar")
+            .occlude()
+            .on_mouse_move(cx.listener(|_, _, _, cx| {
+                cx.notify();
+                cx.stop_propagation()
+            }))
+            .on_hover(|_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_any_mouse_down(|_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| {
+                cx.notify();
+            }))
+            .h_full()
+            .absolute()
+            .right_1()
+            .top_1()
+            .bottom_0()
+            .w(px(12.))
+            .cursor_default()
+            .children(Scrollbar::vertical(self.scrollbar_state.clone()).map(|s| s.auto_hide(cx)))
     }
 }
 
@@ -2552,6 +2671,7 @@ impl Render for AcpThreadView {
                                 .flex_grow()
                                 .into_any(),
                             )
+                            .child(self.render_vertical_scrollbar(cx))
                             .children(match thread_clone.read(cx).status() {
                                 ThreadStatus::Idle | ThreadStatus::WaitingForToolConfirmation => {
                                     None
@@ -3006,7 +3126,11 @@ mod tests {
             unimplemented!()
         }
 
-        fn prompt(&self, params: acp::PromptRequest, cx: &mut App) -> Task<gpui::Result<()>> {
+        fn prompt(
+            &self,
+            params: acp::PromptRequest,
+            cx: &mut App,
+        ) -> Task<gpui::Result<acp::PromptResponse>> {
             let sessions = self.sessions.lock();
             let thread = sessions.get(&params.session_id).unwrap();
             let mut tasks = vec![];
@@ -3040,7 +3164,9 @@ mod tests {
             }
             cx.spawn(async move |_| {
                 try_join_all(tasks).await?;
-                Ok(())
+                Ok(acp::PromptResponse {
+                    stop_reason: acp::StopReason::EndTurn,
+                })
             })
         }
 
@@ -3084,7 +3210,11 @@ mod tests {
             unimplemented!()
         }
 
-        fn prompt(&self, _params: acp::PromptRequest, _cx: &mut App) -> Task<gpui::Result<()>> {
+        fn prompt(
+            &self,
+            _params: acp::PromptRequest,
+            _cx: &mut App,
+        ) -> Task<gpui::Result<acp::PromptResponse>> {
             Task::ready(Err(anyhow::anyhow!("Error prompting")))
         }
 
