@@ -138,9 +138,9 @@ dependencies = [
 
 [[package]]
 name = "agent-client-protocol"
-version = "0.0.20"
+version = "0.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12dbfec3d27680337ed9d3064eecafe97acf0b0f190148bb4e29d96707c9e403"
+checksum = "3fad72b7b8ee4331b3a4c8d43c107e982a4725564b4ee658ae5c4e79d2b486e8"
 dependencies = [
  "anyhow",
  "futures 0.3.31",
@@ -158,7 +158,10 @@ dependencies = [
  "acp_thread",
  "agent-client-protocol",
  "agent_servers",
+ "agent_settings",
  "anyhow",
+ "assistant_tool",
+ "assistant_tools",
  "client",
  "clock",
  "cloud_llm_client",
@@ -171,10 +174,16 @@ dependencies = [
  "gpui_tokio",
  "handlebars 4.5.0",
  "indoc",
+ "itertools 0.14.0",
+ "language",
  "language_model",
  "language_models",
  "log",
+ "lsp",
+ "paths",
+ "pretty_assertions",
  "project",
+ "prompt_store",
  "reqwest_client",
  "rust-embed",
  "schemars",
@@ -185,6 +194,7 @@ dependencies = [
  "ui",
  "util",
  "uuid",
+ "watch",
  "workspace-hack",
  "worktree",
 ]
@@ -7502,9 +7512,9 @@ dependencies = [
 
 [[package]]
 name = "grid"
-version = "0.17.0"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71b01d27060ad58be4663b9e4ac9e2d4806918e8876af8912afbddd1a91d5eaa"
+checksum = "12101ecc8225ea6d675bc70263074eab6169079621c2186fe0c66590b2df9681"
 
 [[package]]
 name = "group"
@@ -9123,6 +9133,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "client",
+ "cloud_api_types",
  "cloud_llm_client",
  "collections",
  "futures 0.3.31",
@@ -12632,6 +12643,7 @@ dependencies = [
  "editor",
  "file_icons",
  "git",
+ "git_ui",
  "gpui",
  "indexmap",
  "language",
@@ -12645,6 +12657,7 @@ dependencies = [
  "serde_json",
  "settings",
  "smallvec",
+ "telemetry",
  "theme",
  "ui",
  "util",
@@ -16215,9 +16228,9 @@ dependencies = [
 
 [[package]]
 name = "taffy"
-version = "0.8.3"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7aaef0ac998e6527d6d0d5582f7e43953bb17221ac75bb8eb2fcc2db3396db1c"
+checksum = "a13e5d13f79d558b5d353a98072ca8ca0e99da429467804de959aa8c83c9a004"
 dependencies = [
  "arrayvec",
  "grid",
