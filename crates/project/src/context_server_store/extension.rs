@@ -64,6 +64,7 @@ impl registry::ContextServerDescriptor for ContextServerDescriptor {
                 .await?;
             command.command = extension.path_from_extension(&command.command);
 
+            log::debug!("loaded command for context server {id}: {command:?}");
             // Only resolve relative paths through the extension.
             // This fixes a Windows issue where absolute paths (e.g., "C:\Users\...")
             // were being incorrectly joined with the extension's work directory,
