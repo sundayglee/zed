@@ -301,11 +301,9 @@ impl ToolCall {
     ) -> Option<AgentLocation> {
         let buffer = project
             .update(cx, |project, cx| {
-                if let Some(path) = project.project_path_for_absolute_path(&location.path, cx) {
-                    Some(project.open_buffer(path, cx))
-                } else {
-                    None
-                }
+                project
+                    .project_path_for_absolute_path(&location.path, cx)
+                    .map(|path| project.open_buffer(path, cx))
             })
             .ok()??;
         let buffer = buffer.await.log_err()?;
@@ -471,7 +469,7 @@ impl ContentBlock {
 
     fn block_string_contents(&self, block: acp::ContentBlock) -> String {
         match block {
-            acp::ContentBlock::Text(text_content) => text_content.text.clone(),
+            acp::ContentBlock::Text(text_content) => text_content.text,
             acp::ContentBlock::ResourceLink(resource_link) => {
                 Self::resource_link_md(&resource_link.uri)
             }
@@ -672,6 +670,37 @@ impl PlanEntry {
 pub struct TokenUsage {
     pub max_tokens: u64,
     pub used_tokens: u64,
+}
+
+impl TokenUsage {
+    pub fn ratio(&self) -> TokenUsageRatio {
+        #[cfg(debug_assertions)]
+        let warning_threshold: f32 = std::env::var("ZED_THREAD_WARNING_THRESHOLD")
+            .unwrap_or("0.8".to_string())
+            .parse()
+            .unwrap();
+        #[cfg(not(debug_assertions))]
+        let warning_threshold: f32 = 0.8;
+
+        // When the maximum is unknown because there is no selected model,
+        // avoid showing the token limit warning.
+        if self.max_tokens == 0 {
+            TokenUsageRatio::Normal
+        } else if self.used_tokens >= self.max_tokens {
+            TokenUsageRatio::Exceeded
+        } else if self.used_tokens as f32 / self.max_tokens as f32 >= warning_threshold {
+            TokenUsageRatio::Warning
+        } else {
+            TokenUsageRatio::Normal
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenUsageRatio {
+    Normal,
+    Warning,
+    Exceeded,
 }
 
 #[derive(Debug, Clone)]
@@ -989,7 +1018,7 @@ impl AcpThread {
                 let location_updated = update.fields.locations.is_some();
                 current_call.update_fields(update.fields, languages, cx);
                 if location_updated {
-                    self.resolve_locations(update.id.clone(), cx);
+                    self.resolve_locations(update.id, cx);
                 }
             }
             ToolCallUpdate::UpdateDiff(update) => {
@@ -1352,7 +1381,7 @@ impl AcpThread {
                         let canceled = matches!(
                             result,
                             Ok(Ok(acp::PromptResponse {
-                                stop_reason: acp::StopReason::Canceled
+                                stop_reason: acp::StopReason::Cancelled
                             }))
                         );
 
@@ -1363,6 +1392,17 @@ impl AcpThread {
                         // would cause the next generation to be canceled.
                         if !canceled {
                             this.send_task.take();
+                        }
+
+                        // Truncate entries if the last prompt was refused.
+                        if let Ok(Ok(acp::PromptResponse {
+                            stop_reason: acp::StopReason::Refusal,
+                        })) = result
+                            && let Some((ix, _)) = this.last_user_message()
+                        {
+                            let range = ix..this.entries.len();
+                            this.entries.truncate(ix);
+                            cx.emit(AcpThreadEvent::EntriesRemoved(range));
                         }
 
                         cx.emit(AcpThreadEvent::Stopped);
@@ -2340,6 +2380,92 @@ mod tests {
         assert_eq!(fs.files(), vec![Path::new(path!("/test/file-0"))]);
     }
 
+    #[gpui::test]
+    async fn test_refusal(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(path!("/"), json!({})).await;
+        let project = Project::test(fs.clone(), [path!("/").as_ref()], cx).await;
+
+        let refuse_next = Arc::new(AtomicBool::new(false));
+        let connection = Rc::new(FakeAgentConnection::new().on_user_message({
+            let refuse_next = refuse_next.clone();
+            move |request, thread, mut cx| {
+                let refuse_next = refuse_next.clone();
+                async move {
+                    if refuse_next.load(SeqCst) {
+                        return Ok(acp::PromptResponse {
+                            stop_reason: acp::StopReason::Refusal,
+                        });
+                    }
+
+                    let acp::ContentBlock::Text(content) = &request.prompt[0] else {
+                        panic!("expected text content block");
+                    };
+                    thread.update(&mut cx, |thread, cx| {
+                        thread
+                            .handle_session_update(
+                                acp::SessionUpdate::AgentMessageChunk {
+                                    content: content.text.to_uppercase().into(),
+                                },
+                                cx,
+                            )
+                            .unwrap();
+                    })?;
+                    Ok(acp::PromptResponse {
+                        stop_reason: acp::StopReason::EndTurn,
+                    })
+                }
+                .boxed_local()
+            }
+        }));
+        let thread = cx
+            .update(|cx| connection.new_thread(project, Path::new(path!("/test")), cx))
+            .await
+            .unwrap();
+
+        cx.update(|cx| thread.update(cx, |thread, cx| thread.send(vec!["hello".into()], cx)))
+            .await
+            .unwrap();
+        thread.read_with(cx, |thread, cx| {
+            assert_eq!(
+                thread.to_markdown(cx),
+                indoc! {"
+                    ## User
+
+                    hello
+
+                    ## Assistant
+
+                    HELLO
+
+                "}
+            );
+        });
+
+        // Simulate refusing the second message, ensuring the conversation gets
+        // truncated to before sending it.
+        refuse_next.store(true, SeqCst);
+        cx.update(|cx| thread.update(cx, |thread, cx| thread.send(vec!["world".into()], cx)))
+            .await
+            .unwrap();
+        thread.read_with(cx, |thread, cx| {
+            assert_eq!(
+                thread.to_markdown(cx),
+                indoc! {"
+                    ## User
+
+                    hello
+
+                    ## Assistant
+
+                    HELLO
+
+                "}
+            );
+        });
+    }
+
     async fn run_until_first_tool_call(
         thread: &Entity<AcpThread>,
         cx: &mut TestAppContext,
@@ -2469,6 +2595,14 @@ mod tests {
                 Task::ready(Ok(acp::PromptResponse {
                     stop_reason: acp::StopReason::EndTurn,
                 }))
+            }
+        }
+
+        fn prompt_capabilities(&self) -> acp::PromptCapabilities {
+            acp::PromptCapabilities {
+                image: true,
+                audio: true,
+                embedded_context: true,
             }
         }
 

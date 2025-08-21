@@ -174,11 +174,9 @@ pub fn hover_at_inlay(
 
                 let subscription = this
                     .update(cx, |_, cx| {
-                        if let Some(parsed_content) = &parsed_content {
-                            Some(cx.observe(parsed_content, |_, _, cx| cx.notify()))
-                        } else {
-                            None
-                        }
+                        parsed_content.as_ref().map(|parsed_content| {
+                            cx.observe(parsed_content, |_, _, cx| cx.notify())
+                        })
                     })
                     .ok()
                     .flatten();
@@ -450,11 +448,9 @@ fn show_hover(
                 let scroll_handle = ScrollHandle::new();
                 let subscription = this
                     .update(cx, |_, cx| {
-                        if let Some(parsed_content) = &parsed_content {
-                            Some(cx.observe(parsed_content, |_, _, cx| cx.notify()))
-                        } else {
-                            None
-                        }
+                        parsed_content.as_ref().map(|parsed_content| {
+                            cx.observe(parsed_content, |_, _, cx| cx.notify())
+                        })
                     })
                     .ok()
                     .flatten();
@@ -502,11 +498,9 @@ fn show_hover(
                 hover_highlights.push(range.clone());
                 let subscription = this
                     .update(cx, |_, cx| {
-                        if let Some(parsed_content) = &parsed_content {
-                            Some(cx.observe(parsed_content, |_, _, cx| cx.notify()))
-                        } else {
-                            None
-                        }
+                        parsed_content.as_ref().map(|parsed_content| {
+                            cx.observe(parsed_content, |_, _, cx| cx.notify())
+                        })
                     })
                     .ok()
                     .flatten();
@@ -623,7 +617,7 @@ pub fn hover_markdown_style(window: &Window, cx: &App) -> MarkdownStyle {
 
     let mut base_text_style = window.text_style();
     base_text_style.refine(&TextStyleRefinement {
-        font_family: Some(ui_font_family.clone()),
+        font_family: Some(ui_font_family),
         font_fallbacks: ui_font_fallbacks,
         color: Some(cx.theme().colors().editor_foreground),
         ..Default::default()
@@ -672,7 +666,7 @@ pub fn diagnostics_markdown_style(window: &Window, cx: &App) -> MarkdownStyle {
 
     let mut base_text_style = window.text_style();
     base_text_style.refine(&TextStyleRefinement {
-        font_family: Some(ui_font_family.clone()),
+        font_family: Some(ui_font_family),
         font_fallbacks: ui_font_fallbacks,
         color: Some(cx.theme().colors().editor_foreground),
         ..Default::default()

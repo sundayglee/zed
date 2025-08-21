@@ -244,7 +244,7 @@ impl BreakpointList {
             return;
         }
         let ix = match self.selected_ix {
-            _ if self.breakpoints.len() == 0 => None,
+            _ if self.breakpoints.is_empty() => None,
             None => Some(0),
             Some(ix) => {
                 if ix == self.breakpoints.len() - 1 {
@@ -268,7 +268,7 @@ impl BreakpointList {
             return;
         }
         let ix = match self.selected_ix {
-            _ if self.breakpoints.len() == 0 => None,
+            _ if self.breakpoints.is_empty() => None,
             None => Some(self.breakpoints.len() - 1),
             Some(ix) => {
                 if ix == 0 {
@@ -286,7 +286,7 @@ impl BreakpointList {
             cx.propagate();
             return;
         }
-        let ix = if self.breakpoints.len() > 0 {
+        let ix = if !self.breakpoints.is_empty() {
             Some(0)
         } else {
             None
@@ -299,7 +299,7 @@ impl BreakpointList {
             cx.propagate();
             return;
         }
-        let ix = if self.breakpoints.len() > 0 {
+        let ix = if !self.breakpoints.is_empty() {
             Some(self.breakpoints.len() - 1)
         } else {
             None
@@ -685,7 +685,6 @@ impl BreakpointList {
                         selection_kind.map(|kind| kind.0) != Some(SelectedBreakpointKind::Source),
                     )
                     .on_click({
-                        let focus_handle = focus_handle.clone();
                         move |_, window, cx| {
                             focus_handle.focus(window);
                             window.dispatch_action(UnsetBreakpoint.boxed_clone(), cx)
@@ -1139,7 +1138,6 @@ impl ExceptionBreakpoint {
                     }
                 })
                 .on_click({
-                    let list = list.clone();
                     move |_, _, cx| {
                         list.update(cx, |this, cx| {
                             this.toggle_exception_breakpoint(&id, cx);

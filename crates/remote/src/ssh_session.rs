@@ -233,8 +233,8 @@ impl SshConnectionOptions {
         };
 
         Ok(Self {
-            host: hostname.to_string(),
-            username: username.clone(),
+            host: hostname,
+            username,
             port,
             port_forwards,
             args: Some(args),
@@ -948,7 +948,7 @@ impl SshRemoteClient {
                     if old_state.is_reconnecting() {
                         match &new_state {
                             State::Connecting
-                            | State::Reconnecting { .. }
+                            | State::Reconnecting
                             | State::HeartbeatMissed { .. }
                             | State::ServerNotRunning => {}
                             State::Connected { .. } => {
@@ -1363,7 +1363,7 @@ impl ConnectionPool {
 
 impl From<SshRemoteClient> for AnyProtoClient {
     fn from(client: SshRemoteClient) -> Self {
-        AnyProtoClient::new(client.client.clone())
+        AnyProtoClient::new(client.client)
     }
 }
 
@@ -1452,7 +1452,7 @@ impl RemoteConnection for SshRemoteConnection {
             .arg(format!(
                 "{}:{}",
                 self.socket.connection_options.scp_url(),
-                dest_path.to_string()
+                dest_path
             ))
             .output();
 
@@ -1836,11 +1836,7 @@ impl SshRemoteConnection {
         })??;
 
         let tmp_path_gz = RemotePathBuf::new(
-            PathBuf::from(format!(
-                "{}-download-{}.gz",
-                dst_path.to_string(),
-                std::process::id()
-            )),
+            PathBuf::from(format!("{}-download-{}.gz", dst_path, std::process::id())),
             self.ssh_path_style,
         );
         if !self.socket.connection_options.upload_binary_over_ssh
@@ -2036,7 +2032,7 @@ impl SshRemoteConnection {
             .arg(format!(
                 "{}:{}",
                 self.socket.connection_options.scp_url(),
-                dest_path.to_string()
+                dest_path
             ))
             .output()
             .await?;
@@ -2357,6 +2353,7 @@ impl ChannelClient {
                     build_typed_envelope(peer_id, Instant::now(), incoming)
                 {
                     let type_name = envelope.payload_type_name();
+                    let message_id = envelope.message_id();
                     if let Some(future) = ProtoMessageHandlerSet::handle_message(
                         &this.message_handlers,
                         envelope,
@@ -2395,6 +2392,15 @@ impl ChannelClient {
                             .detach()
                     } else {
                         log::error!("{}:unhandled ssh message name:{type_name}", this.name);
+                        if let Err(e) = AnyProtoClient::from(this.clone()).send_response(
+                            message_id,
+                            anyhow::anyhow!("no handler registered for {type_name}").to_proto(),
+                        ) {
+                            log::error!(
+                                "{}:error sending error response for {type_name}:{e:#}",
+                                this.name
+                            );
+                        }
                     }
                 }
             }

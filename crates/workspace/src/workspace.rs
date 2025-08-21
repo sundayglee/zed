@@ -903,7 +903,7 @@ impl AppState {
         let languages = Arc::new(LanguageRegistry::test(cx.background_executor().clone()));
         let clock = Arc::new(clock::FakeSystemClock::new());
         let http_client = http_client::FakeHttpClient::with_404_response();
-        let client = Client::new(clock, http_client.clone(), cx);
+        let client = Client::new(clock, http_client, cx);
         let session = cx.new(|cx| AppSession::new(Session::test(), cx));
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
         let workspace_store = cx.new(|cx| WorkspaceStore::new(client.clone(), cx));
@@ -1323,7 +1323,6 @@ impl Workspace {
 
         let mut active_call = None;
         if let Some(call) = ActiveCall::try_global(cx) {
-            let call = call.clone();
             let subscriptions = vec![cx.subscribe_in(&call, window, Self::on_active_call_event)];
             active_call = Some((call, subscriptions));
         }
@@ -4116,7 +4115,6 @@ impl Workspace {
             .unwrap_or_else(|| {
                 self.split_pane(self.active_pane.clone(), SplitDirection::Right, window, cx)
             })
-            .clone()
     }
 
     pub fn pane_for(&self, handle: &dyn ItemHandle) -> Option<Entity<Pane>> {
@@ -4734,14 +4732,12 @@ impl Workspace {
                         })
                     });
 
-                    if let Some(view) = view {
-                        Some(entry.insert(FollowerView {
+                    view.map(|view| {
+                        entry.insert(FollowerView {
                             view,
                             location: None,
-                        }))
-                    } else {
-                        None
-                    }
+                        })
+                    })
                 }
             };
 
@@ -6713,7 +6709,7 @@ impl WorkspaceStore {
                     .update(cx, |workspace, window, cx| {
                         let handler_response =
                             workspace.handle_follow(follower.project_id, window, cx);
-                        if let Some(active_view) = handler_response.active_view.clone()
+                        if let Some(active_view) = handler_response.active_view
                             && workspace.project.read(cx).remote_id() == follower.project_id
                         {
                             response.active_view = Some(active_view)
@@ -7672,7 +7668,7 @@ pub fn client_side_decorations(
 
     match decorations {
         Decorations::Client { .. } => window.set_client_inset(theme::CLIENT_SIDE_DECORATION_SHADOW),
-        Decorations::Server { .. } => window.set_client_inset(px(0.0)),
+        Decorations::Server => window.set_client_inset(px(0.0)),
     }
 
     struct GlobalResizeEdge(ResizeEdge);

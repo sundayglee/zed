@@ -975,7 +975,7 @@ async fn test_cancellation(cx: &mut TestAppContext) {
     assert!(
         matches!(
             last_event,
-            Some(Ok(ThreadEvent::Stop(acp::StopReason::Canceled)))
+            Some(Ok(ThreadEvent::Stop(acp::StopReason::Cancelled)))
         ),
         "unexpected event {last_event:?}"
     );
@@ -1029,7 +1029,7 @@ async fn test_in_progress_send_canceled_by_next_send(cx: &mut TestAppContext) {
     fake_model.end_last_completion_stream();
 
     let events_1 = events_1.collect::<Vec<_>>().await;
-    assert_eq!(stop_events(events_1), vec![acp::StopReason::Canceled]);
+    assert_eq!(stop_events(events_1), vec![acp::StopReason::Cancelled]);
     let events_2 = events_2.collect::<Vec<_>>().await;
     assert_eq!(stop_events(events_2), vec![acp::StopReason::EndTurn]);
 }
@@ -1401,7 +1401,7 @@ async fn test_agent_connection(cx: &mut TestAppContext) {
         let client = Client::new(clock, http_client, cx);
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
         language_model::init(client.clone(), cx);
-        language_models::init(user_store.clone(), client.clone(), cx);
+        language_models::init(user_store, client.clone(), cx);
         Project::init_settings(cx);
         LanguageModelRegistry::test(cx);
         agent_settings::init(cx);
@@ -1854,7 +1854,7 @@ async fn setup(cx: &mut TestAppContext, model: TestModel) -> ThreadTest {
         let client = Client::production(cx);
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
         language_model::init(client.clone(), cx);
-        language_models::init(user_store.clone(), client.clone(), cx);
+        language_models::init(user_store, client.clone(), cx);
 
         watch_settings(fs.clone(), cx);
     });

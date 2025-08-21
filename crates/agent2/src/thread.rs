@@ -15,7 +15,8 @@ use agent_settings::{
 use anyhow::{Context as _, Result, anyhow};
 use assistant_tool::adapt_schema_to_format;
 use chrono::{DateTime, Utc};
-use cloud_llm_client::{CompletionIntent, CompletionRequestStatus};
+use client::{ModelRequestUsage, RequestUsage};
+use cloud_llm_client::{CompletionIntent, CompletionRequestStatus, UsageLimit};
 use collections::{HashMap, IndexMap};
 use fs::Fs;
 use futures::{
@@ -25,7 +26,9 @@ use futures::{
     stream::FuturesUnordered,
 };
 use git::repository::DiffType;
-use gpui::{App, AppContext, AsyncApp, Context, Entity, SharedString, Task, WeakEntity};
+use gpui::{
+    App, AppContext, AsyncApp, Context, Entity, EventEmitter, SharedString, Task, WeakEntity,
+};
 use language_model::{
     LanguageModel, LanguageModelCompletionError, LanguageModelCompletionEvent, LanguageModelExt,
     LanguageModelImage, LanguageModelProviderId, LanguageModelRegistry, LanguageModelRequest,
@@ -158,9 +161,9 @@ impl UserMessage {
                 }
                 UserMessageContent::Mention { uri, content } => {
                     if !content.is_empty() {
-                        let _ = write!(&mut markdown, "{}\n\n{}\n", uri.as_link(), content);
+                        let _ = writeln!(&mut markdown, "{}\n\n{}", uri.as_link(), content);
                     } else {
-                        let _ = write!(&mut markdown, "{}\n", uri.as_link());
+                        let _ = writeln!(&mut markdown, "{}", uri.as_link());
                     }
                 }
             }
@@ -484,7 +487,6 @@ pub enum ThreadEvent {
     ToolCall(acp::ToolCall),
     ToolCallUpdate(acp_thread::ToolCallUpdate),
     ToolCallAuthorization(ToolCallAuthorization),
-    TokenUsageUpdate(acp_thread::TokenUsage),
     TitleUpdate(SharedString),
     Retry(acp_thread::RetryStatus),
     Stop(acp::StopReason),
@@ -677,7 +679,7 @@ impl Thread {
                 .and_then(|model| {
                     let model = SelectedModel {
                         provider: model.provider.clone().into(),
-                        model: model.model.clone().into(),
+                        model: model.model.into(),
                     };
                     registry.select_model(&model, cx)
                 })
@@ -718,7 +720,7 @@ impl Thread {
     pub fn to_db(&self, cx: &App) -> Task<DbThread> {
         let initial_project_snapshot = self.initial_project_snapshot.clone();
         let mut thread = DbThread {
-            title: self.title.clone().unwrap_or_default(),
+            title: self.title(),
             messages: self.messages.clone(),
             updated_at: self.updated_at,
             detailed_summary: self.summary.clone(),
@@ -868,13 +870,26 @@ impl Thread {
         &self.action_log
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty() && self.title.is_none()
+    }
+
     pub fn model(&self) -> Option<&Arc<dyn LanguageModel>> {
         self.model.as_ref()
     }
 
     pub fn set_model(&mut self, model: Arc<dyn LanguageModel>, cx: &mut Context<Self>) {
+        let old_usage = self.latest_token_usage();
         self.model = Some(model);
+        let new_usage = self.latest_token_usage();
+        if old_usage != new_usage {
+            cx.emit(TokenUsageUpdated(new_usage));
+        }
         cx.notify()
+    }
+
+    pub fn summarization_model(&self) -> Option<&Arc<dyn LanguageModel>> {
+        self.summarization_model.as_ref()
     }
 
     pub fn set_summarization_model(
@@ -891,7 +906,12 @@ impl Thread {
     }
 
     pub fn set_completion_mode(&mut self, mode: CompletionMode, cx: &mut Context<Self>) {
+        let old_usage = self.latest_token_usage();
         self.completion_mode = mode;
+        let new_usage = self.latest_token_usage();
+        if old_usage != new_usage {
+            cx.emit(TokenUsageUpdated(new_usage));
+        }
         cx.notify()
     }
 
@@ -953,13 +973,15 @@ impl Thread {
         self.flush_pending_message(cx);
     }
 
-    pub fn update_token_usage(&mut self, update: language_model::TokenUsage) {
+    fn update_token_usage(&mut self, update: language_model::TokenUsage, cx: &mut Context<Self>) {
         let Some(last_user_message) = self.last_user_message() else {
             return;
         };
 
         self.request_token_usage
             .insert(last_user_message.id.clone(), update);
+        cx.emit(TokenUsageUpdated(self.latest_token_usage()));
+        cx.notify();
     }
 
     pub fn truncate(&mut self, message_id: UserMessageId, cx: &mut Context<Self>) -> Result<()> {
@@ -1054,6 +1076,7 @@ impl Thread {
             event_stream: event_stream.clone(),
             _task: cx.spawn(async move |this, cx| {
                 log::info!("Starting agent turn execution");
+                let mut update_title = None;
                 let turn_result: Result<StopReason> = async {
                     let mut completion_intent = CompletionIntent::UserPrompt;
                     loop {
@@ -1108,9 +1131,14 @@ impl Thread {
                                 this.pending_message()
                                     .tool_results
                                     .insert(tool_result.tool_use_id.clone(), tool_result);
-                            })
-                            .ok();
+                            })?;
                         }
+
+                        this.update(cx, |this, cx| {
+                            if this.title.is_none() && update_title.is_none() {
+                                update_title = Some(this.update_title(&event_stream, cx));
+                            }
+                        })?;
 
                         if tool_use_limit_reached {
                             log::info!("Tool use limit reached, completing turn");
@@ -1132,10 +1160,6 @@ impl Thread {
                     Ok(reason) => {
                         log::info!("Turn execution completed: {:?}", reason);
 
-                        let update_title = this
-                            .update(cx, |this, cx| this.update_title(&event_stream, cx))
-                            .ok()
-                            .flatten();
                         if let Some(update_title) = update_title {
                             update_title.await.context("update title failed").log_err();
                         }
@@ -1171,6 +1195,15 @@ impl Thread {
 
         let mut attempt = None;
         'retry: loop {
+            telemetry::event!(
+                "Agent Thread Completion",
+                thread_id = this.read_with(cx, |this, _| this.id.to_string())?,
+                prompt_id = this.read_with(cx, |this, _| this.prompt_id.to_string())?,
+                model = model.telemetry_id(),
+                model_provider = model.provider_id().to_string(),
+                attempt
+            );
+
             let mut events = model.stream_completion(request.clone(), cx).await?;
             let mut tool_uses = FuturesUnordered::new();
             while let Some(event) = events.next().await {
@@ -1180,20 +1213,28 @@ impl Thread {
                     )) => {
                         *tool_use_limit_reached = true;
                     }
-                    Ok(LanguageModelCompletionEvent::UsageUpdate(token_usage)) => {
-                        let usage = acp_thread::TokenUsage {
-                            max_tokens: model.max_token_count_for_mode(
-                                request
-                                    .mode
-                                    .unwrap_or(cloud_llm_client::CompletionMode::Normal),
-                            ),
-                            used_tokens: token_usage.total_tokens(),
-                        };
+                    Ok(LanguageModelCompletionEvent::StatusUpdate(
+                        CompletionRequestStatus::UsageUpdated { amount, limit },
+                    )) => {
+                        this.update(cx, |this, cx| {
+                            this.update_model_request_usage(amount, limit, cx)
+                        })?;
+                    }
+                    Ok(LanguageModelCompletionEvent::UsageUpdate(usage)) => {
+                        telemetry::event!(
+                            "Agent Thread Completion Usage Updated",
+                            thread_id = this.read_with(cx, |this, _| this.id.to_string())?,
+                            prompt_id = this.read_with(cx, |this, _| this.prompt_id.to_string())?,
+                            model = model.telemetry_id(),
+                            model_provider = model.provider_id().to_string(),
+                            attempt,
+                            input_tokens = usage.input_tokens,
+                            output_tokens = usage.output_tokens,
+                            cache_creation_input_tokens = usage.cache_creation_input_tokens,
+                            cache_read_input_tokens = usage.cache_read_input_tokens,
+                        );
 
-                        this.update(cx, |this, _cx| this.update_token_usage(token_usage))
-                            .ok();
-
-                        event_stream.send_token_usage_update(usage);
+                        this.update(cx, |this, cx| this.update_token_usage(usage, cx))?;
                     }
                     Ok(LanguageModelCompletionEvent::Stop(StopReason::Refusal)) => {
                         *refusal = true;
@@ -1214,8 +1255,7 @@ impl Thread {
                                 event_stream,
                                 cx,
                             ));
-                        })
-                        .ok();
+                        })?;
                     }
                     Err(error) => {
                         let completion_mode =
@@ -1325,8 +1365,8 @@ impl Thread {
                     json_parse_error,
                 )));
             }
-            UsageUpdate(_) | StatusUpdate(_) => {}
-            Stop(_) => unreachable!(),
+            StatusUpdate(_) => {}
+            UsageUpdate(_) | Stop(_) => unreachable!(),
         }
 
         None
@@ -1506,6 +1546,21 @@ impl Thread {
         }
     }
 
+    fn update_model_request_usage(&self, amount: usize, limit: UsageLimit, cx: &mut Context<Self>) {
+        self.project
+            .read(cx)
+            .user_store()
+            .update(cx, |user_store, cx| {
+                user_store.update_model_request_usage(
+                    ModelRequestUsage(RequestUsage {
+                        amount: amount as i32,
+                        limit,
+                    }),
+                    cx,
+                )
+            });
+    }
+
     pub fn title(&self) -> SharedString {
         self.title.clone().unwrap_or("New Thread".into())
     }
@@ -1518,7 +1573,7 @@ impl Thread {
             return Task::ready(Err(anyhow!("No summarization model available")));
         };
         let mut request = LanguageModelRequest {
-            intent: Some(CompletionIntent::ThreadSummarization),
+            intent: Some(CompletionIntent::ThreadContextSummarization),
             temperature: AgentSettings::temperature_for_model(&model, cx),
             ..Default::default()
         };
@@ -1540,12 +1595,11 @@ impl Thread {
                 let text = match event {
                     LanguageModelCompletionEvent::Text(text) => text,
                     LanguageModelCompletionEvent::StatusUpdate(
-                        CompletionRequestStatus::UsageUpdated { .. },
+                        CompletionRequestStatus::UsageUpdated { amount, limit },
                     ) => {
-                        // this.update(cx, |thread, cx| {
-                        //     thread.update_model_request_usage(amount as u32, limit, cx);
-                        // })?;
-                        // TODO: handle usage update
+                        this.update(cx, |thread, cx| {
+                            thread.update_model_request_usage(amount, limit, cx);
+                        })?;
                         continue;
                     }
                     _ => continue,
@@ -1571,17 +1625,14 @@ impl Thread {
         &mut self,
         event_stream: &ThreadEventStream,
         cx: &mut Context<Self>,
-    ) -> Option<Task<Result<()>>> {
-        if self.title.is_some() {
-            log::debug!("Skipping title generation because we already have one.");
-            return None;
-        }
-
+    ) -> Task<Result<()>> {
         log::info!(
             "Generating title with model: {:?}",
             self.summarization_model.as_ref().map(|model| model.name())
         );
-        let model = self.summarization_model.clone()?;
+        let Some(model) = self.summarization_model.clone() else {
+            return Task::ready(Ok(()));
+        };
         let event_stream = event_stream.clone();
         let mut request = LanguageModelRequest {
             intent: Some(CompletionIntent::ThreadSummarization),
@@ -1598,7 +1649,7 @@ impl Thread {
             content: vec![SUMMARIZE_THREAD_PROMPT.into()],
             cache: false,
         });
-        Some(cx.spawn(async move |this, cx| {
+        cx.spawn(async move |this, cx| {
             let mut title = String::new();
             let mut messages = model.stream_completion(request, cx).await?;
             while let Some(event) = messages.next().await {
@@ -1606,12 +1657,11 @@ impl Thread {
                 let text = match event {
                     LanguageModelCompletionEvent::Text(text) => text,
                     LanguageModelCompletionEvent::StatusUpdate(
-                        CompletionRequestStatus::UsageUpdated { .. },
+                        CompletionRequestStatus::UsageUpdated { amount, limit },
                     ) => {
-                        // this.update(cx, |thread, cx| {
-                        //     thread.update_model_request_usage(amount as u32, limit, cx);
-                        // })?;
-                        // TODO: handle usage update
+                        this.update(cx, |thread, cx| {
+                            thread.update_model_request_usage(amount, limit, cx);
+                        })?;
                         continue;
                     }
                     _ => continue,
@@ -1634,8 +1684,9 @@ impl Thread {
                 this.title = Some(title);
                 cx.notify();
             })
-        }))
+        })
     }
+
     fn last_user_message(&self) -> Option<&UserMessage> {
         self.messages
             .iter()
@@ -1934,6 +1985,10 @@ impl RunningTurn {
     }
 }
 
+pub struct TokenUsageUpdated(pub Option<acp_thread::TokenUsage>);
+
+impl EventEmitter<TokenUsageUpdated> for Thread {}
+
 pub trait AgentTool
 where
     Self: 'static + Sized,
@@ -2166,12 +2221,6 @@ impl ThreadEventStream {
             .ok();
     }
 
-    fn send_token_usage_update(&self, usage: acp_thread::TokenUsage) {
-        self.0
-            .unbounded_send(Ok(ThreadEvent::TokenUsageUpdate(usage)))
-            .ok();
-    }
-
     fn send_retry(&self, status: acp_thread::RetryStatus) {
         self.0.unbounded_send(Ok(ThreadEvent::Retry(status))).ok();
     }
@@ -2199,7 +2248,7 @@ impl ThreadEventStream {
 
     fn send_canceled(&self) {
         self.0
-            .unbounded_send(Ok(ThreadEvent::Stop(acp::StopReason::Canceled)))
+            .unbounded_send(Ok(ThreadEvent::Stop(acp::StopReason::Cancelled)))
             .ok();
     }
 
@@ -2437,18 +2486,15 @@ impl From<UserMessageContent> for acp::ContentBlock {
                 uri: None,
             }),
             UserMessageContent::Mention { uri, content } => {
-                acp::ContentBlock::ResourceLink(acp::ResourceLink {
-                    uri: uri.to_uri().to_string(),
-                    name: uri.name(),
+                acp::ContentBlock::Resource(acp::EmbeddedResource {
+                    resource: acp::EmbeddedResourceResource::TextResourceContents(
+                        acp::TextResourceContents {
+                            mime_type: None,
+                            text: content,
+                            uri: uri.to_uri().to_string(),
+                        },
+                    ),
                     annotations: None,
-                    description: if content.is_empty() {
-                        None
-                    } else {
-                        Some(content)
-                    },
-                    mime_type: None,
-                    size: None,
-                    title: None,
                 })
             }
         }
