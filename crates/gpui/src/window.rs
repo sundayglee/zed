@@ -4390,6 +4390,13 @@ impl Window {
         self.platform_window.toggle_window_tab_overview()
     }
 
+    /// Sets the tabbing identifier for the window.
+    /// This is macOS specific.
+    pub fn set_tabbing_identifier(&self, tabbing_identifier: Option<String>) {
+        self.platform_window
+            .set_tabbing_identifier(tabbing_identifier)
+    }
+
     /// Toggles the inspector mode on this window.
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub fn toggle_inspector(&mut self, cx: &mut App) {
@@ -4577,6 +4584,13 @@ impl Window {
             }
         }
         None
+    }
+
+    /// For testing: set the current modifier keys state.
+    /// This does not generate any events.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_modifiers(&mut self, modifiers: Modifiers) {
+        self.modifiers = modifiers;
     }
 }
 
