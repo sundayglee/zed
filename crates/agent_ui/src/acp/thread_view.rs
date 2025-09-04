@@ -46,7 +46,7 @@ use text::Anchor;
 use theme::ThemeSettings;
 use ui::{
     Callout, CommonAnimationExt, Disclosure, Divider, DividerColor, ElevationIndex, KeyBinding,
-    PopoverMenuHandle, Scrollbar, ScrollbarState, SpinnerLabel, Tooltip, prelude::*,
+    PopoverMenuHandle, Scrollbar, ScrollbarState, SpinnerLabel, TintColor, Tooltip, prelude::*,
 };
 use util::{ResultExt, size::format_file_size, time::duration_alt_display};
 use workspace::{CollaboratorId, Workspace};
@@ -288,6 +288,7 @@ pub struct AcpThreadView {
     prompt_capabilities: Rc<Cell<PromptCapabilities>>,
     available_commands: Rc<RefCell<Vec<acp::AvailableCommand>>>,
     is_loading_contents: bool,
+    new_server_version_available: Option<SharedString>,
     _cancel_task: Option<Task<()>>,
     _subscriptions: [Subscription; 3],
 }
@@ -332,6 +333,11 @@ impl AcpThreadView {
 
         let placeholder = if agent.name() == "Zed Agent" {
             format!("Message the {} — @ to include context", agent.name())
+        } else if agent.name() == "Claude Code" || !available_commands.borrow().is_empty() {
+            format!(
+                "Message {} — @ to include context, / for commands",
+                agent.name()
+            )
         } else {
             format!("Message {} — @ to include context", agent.name())
         };
@@ -411,7 +417,22 @@ impl AcpThreadView {
             _subscriptions: subscriptions,
             _cancel_task: None,
             focus_handle: cx.focus_handle(),
+            new_server_version_available: None,
         }
+    }
+
+    fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.thread_state = Self::initial_state(
+            self.agent.clone(),
+            None,
+            self.workspace.clone(),
+            self.project.clone(),
+            window,
+            cx,
+        );
+        self.available_commands.replace(vec![]);
+        self.new_server_version_available.take();
+        cx.notify();
     }
 
     fn initial_state(
@@ -427,14 +448,32 @@ impl AcpThreadView {
                 "External agents are not yet supported for remote projects.".into(),
             ));
         }
-        let root_dir = project
-            .read(cx)
-            .visible_worktrees(cx)
+        let mut worktrees = project.read(cx).visible_worktrees(cx).collect::<Vec<_>>();
+        // Pick the first non-single-file worktree for the root directory if there are any,
+        // and otherwise the parent of a single-file worktree, falling back to $HOME if there are no visible worktrees.
+        worktrees.sort_by(|l, r| {
+            l.read(cx)
+                .is_single_file()
+                .cmp(&r.read(cx).is_single_file())
+        });
+        let root_dir = worktrees
+            .into_iter()
+            .filter_map(|worktree| {
+                if worktree.read(cx).is_single_file() {
+                    Some(worktree.read(cx).abs_path().parent()?.into())
+                } else {
+                    Some(worktree.read(cx).abs_path())
+                }
+            })
             .next()
-            .map(|worktree| worktree.read(cx).abs_path())
             .unwrap_or_else(|| paths::home_dir().as_path().into());
-        let (tx, mut rx) = watch::channel("Loading…".into());
-        let delegate = AgentServerDelegate::new(project.clone(), Some(tx));
+        let (status_tx, mut status_rx) = watch::channel("Loading…".into());
+        let (new_version_available_tx, mut new_version_available_rx) = watch::channel(None);
+        let delegate = AgentServerDelegate::new(
+            project.clone(),
+            Some(status_tx),
+            Some(new_version_available_tx),
+        );
 
         let connect_task = agent.connect(&root_dir, delegate, cx);
         let load_task = cx.spawn_in(window, async move |this, cx| {
@@ -496,26 +535,6 @@ impl AcpThreadView {
                 match result {
                     Ok(thread) => {
                         let action_log = thread.read(cx).action_log().clone();
-
-                        let mut available_commands = thread.read(cx).available_commands();
-
-                        if connection
-                            .auth_methods()
-                            .iter()
-                            .any(|method| method.id.0.as_ref() == "claude-login")
-                        {
-                            available_commands.push(acp::AvailableCommand {
-                                name: "login".to_owned(),
-                                description: "Authenticate".to_owned(),
-                                input: None,
-                            });
-                            available_commands.push(acp::AvailableCommand {
-                                name: "logout".to_owned(),
-                                description: "Authenticate".to_owned(),
-                                input: None,
-                            });
-                        }
-                        this.available_commands.replace(available_commands);
 
                         this.prompt_capabilities
                             .set(thread.read(cx).prompt_capabilities());
@@ -609,10 +628,23 @@ impl AcpThreadView {
             .log_err();
         });
 
+        cx.spawn(async move |this, cx| {
+            while let Ok(new_version) = new_version_available_rx.recv().await {
+                if let Some(new_version) = new_version {
+                    this.update(cx, |this, cx| {
+                        this.new_server_version_available = Some(new_version.into());
+                        cx.notify();
+                    })
+                    .log_err();
+                }
+            }
+        })
+        .detach();
+
         let loading_view = cx.new(|cx| {
             let update_title_task = cx.spawn(async move |this, cx| {
                 loop {
-                    let status = rx.recv().await?;
+                    let status = status_rx.recv().await?;
                     this.update(cx, |this: &mut LoadingView, cx| {
                         this.title = status;
                         cx.notify();
@@ -648,17 +680,13 @@ impl AcpThreadView {
                 move |_, ev, window, cx| {
                     if let language_model::Event::ProviderStateChanged(updated_provider_id) = &ev
                         && &provider_id == updated_provider_id
+                        && LanguageModelRegistry::global(cx)
+                            .read(cx)
+                            .provider(&provider_id)
+                            .map_or(false, |provider| provider.is_authenticated(cx))
                     {
                         this.update(cx, |this, cx| {
-                            this.thread_state = Self::initial_state(
-                                agent.clone(),
-                                None,
-                                this.workspace.clone(),
-                                this.project.clone(),
-                                window,
-                                cx,
-                            );
-                            cx.notify();
+                            this.reset(window, cx);
                         })
                         .ok();
                     }
@@ -1296,6 +1324,30 @@ impl AcpThreadView {
                     .set(thread.read(cx).prompt_capabilities());
             }
             AcpThreadEvent::TokenUsageUpdated => {}
+            AcpThreadEvent::AvailableCommandsUpdated(available_commands) => {
+                let mut available_commands = available_commands.clone();
+
+                if thread
+                    .read(cx)
+                    .connection()
+                    .auth_methods()
+                    .iter()
+                    .any(|method| method.id.0.as_ref() == "claude-login")
+                {
+                    available_commands.push(acp::AvailableCommand {
+                        name: "login".to_owned(),
+                        description: "Authenticate".to_owned(),
+                        input: None,
+                    });
+                    available_commands.push(acp::AvailableCommand {
+                        name: "logout".to_owned(),
+                        description: "Authenticate".to_owned(),
+                        input: None,
+                    });
+                }
+
+                self.available_commands.replace(available_commands);
+            }
         }
         cx.notify();
     }
@@ -1347,11 +1399,11 @@ impl AcpThreadView {
                 .read(cx)
                 .provider(&language_model::ANTHROPIC_PROVIDER_ID)
                 .unwrap();
-            if !provider.is_authenticated(cx) {
-                let this = cx.weak_entity();
-                let agent = self.agent.clone();
-                let connection = connection.clone();
-                window.defer(cx, |window, cx| {
+            let this = cx.weak_entity();
+            let agent = self.agent.clone();
+            let connection = connection.clone();
+            window.defer(cx, move |window, cx| {
+                if !provider.is_authenticated(cx) {
                     Self::handle_auth_required(
                         this,
                         AuthRequired {
@@ -1363,9 +1415,21 @@ impl AcpThreadView {
                         window,
                         cx,
                     );
-                });
-                return;
-            }
+                } else {
+                    this.update(cx, |this, cx| {
+                        this.thread_state = Self::initial_state(
+                            agent,
+                            None,
+                            this.workspace.clone(),
+                            this.project.clone(),
+                            window,
+                            cx,
+                        )
+                    })
+                    .ok();
+                }
+            });
+            return;
         } else if method.0.as_ref() == "vertex-ai"
             && std::env::var("GOOGLE_API_KEY").is_err()
             && (std::env::var("GOOGLE_CLOUD_PROJECT").is_err()
@@ -1409,7 +1473,6 @@ impl AcpThreadView {
         cx.notify();
         self.auth_task =
             Some(cx.spawn_in(window, {
-                let project = self.project.clone();
                 let agent = self.agent.clone();
                 async move |this, cx| {
                     let result = authenticate.await;
@@ -1438,14 +1501,7 @@ impl AcpThreadView {
                             }
                             this.handle_thread_error(err, cx);
                         } else {
-                            this.thread_state = Self::initial_state(
-                                agent,
-                                None,
-                                this.workspace.clone(),
-                                project.clone(),
-                                window,
-                                cx,
-                            )
+                            this.reset(window, cx);
                         }
                         this.auth_task.take()
                     })
@@ -1467,7 +1523,7 @@ impl AcpThreadView {
         let cwd = project.first_project_directory(cx);
         let shell = project.terminal_settings(&cwd, cx).shell.clone();
 
-        let delegate = AgentServerDelegate::new(project_entity.clone(), None);
+        let delegate = AgentServerDelegate::new(project_entity.clone(), None, None);
         let command = ClaudeCode::login_command(delegate, cx);
 
         window.spawn(cx, async move |cx| {
@@ -2586,28 +2642,6 @@ impl AcpThreadView {
                             .with_rotate_animation(2)
                     )
             })
-            .child(
-                Disclosure::new(
-                    SharedString::from(format!(
-                        "terminal-tool-disclosure-{}",
-                        terminal.entity_id()
-                    )),
-                    is_expanded,
-                )
-                .opened_icon(IconName::ChevronUp)
-                .closed_icon(IconName::ChevronDown)
-                .visible_on_hover(&header_group)
-                .on_click(cx.listener({
-                    let id = tool_call.id.clone();
-                    move |this, _event, _window, _cx| {
-                        if is_expanded {
-                            this.expanded_tool_calls.remove(&id);
-                        } else {
-                            this.expanded_tool_calls.insert(id.clone());
-                        }
-                    }
-                })),
-            )
             .when(truncated_output, |header| {
                 let tooltip = if let Some(output) = output {
                     if output_line_count + 10 > terminal::MAX_SCROLL_HISTORY_LINES {
@@ -2666,7 +2700,29 @@ impl AcpThreadView {
                             )))
                         }),
                 )
-            });
+            })
+            .child(
+                Disclosure::new(
+                    SharedString::from(format!(
+                        "terminal-tool-disclosure-{}",
+                        terminal.entity_id()
+                    )),
+                    is_expanded,
+                )
+                .opened_icon(IconName::ChevronUp)
+                .closed_icon(IconName::ChevronDown)
+                .visible_on_hover(&header_group)
+                .on_click(cx.listener({
+                    let id = tool_call.id.clone();
+                    move |this, _event, _window, _cx| {
+                        if is_expanded {
+                            this.expanded_tool_calls.remove(&id);
+                        } else {
+                            this.expanded_tool_calls.insert(id.clone());
+                        }
+                    }
+                })),
+            );
 
         let terminal_view = self
             .entry_view_state
@@ -4766,6 +4822,38 @@ impl AcpThreadView {
         Some(div().child(content))
     }
 
+    fn render_new_version_callout(&self, version: &SharedString, cx: &mut Context<Self>) -> Div {
+        v_flex().w_full().justify_end().child(
+            h_flex()
+                .p_2()
+                .pr_3()
+                .w_full()
+                .gap_1p5()
+                .border_t_1()
+                .border_color(cx.theme().colors().border)
+                .bg(cx.theme().colors().element_background)
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .gap_1p5()
+                        .child(
+                            Icon::new(IconName::Download)
+                                .color(Color::Accent)
+                                .size(IconSize::Small),
+                        )
+                        .child(Label::new("New version available").size(LabelSize::Small)),
+                )
+                .child(
+                    Button::new("update-button", format!("Update to v{}", version))
+                        .label_size(LabelSize::Small)
+                        .style(ButtonStyle::Tinted(TintColor::Accent))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.reset(window, cx);
+                        })),
+                ),
+        )
+    }
+
     fn get_current_model_name(&self, cx: &App) -> SharedString {
         // For native agent (Zed Agent), use the specific model name (e.g., "Claude 3.5 Sonnet")
         // For ACP agents, use the agent name (e.g., "Claude Code", "Gemini CLI")
@@ -5176,6 +5264,12 @@ impl Render for AcpThreadView {
             })
             .children(self.render_thread_retry_status_callout(window, cx))
             .children(self.render_thread_error(window, cx))
+            .when_some(
+                self.new_server_version_available.as_ref().filter(|_| {
+                    !has_messages || !matches!(self.thread_state, ThreadState::Ready { .. })
+                }),
+                |this, version| this.child(self.render_new_version_callout(&version, cx)),
+            )
             .children(
                 if let Some(usage_callout) = self.render_usage_callout(line_height, cx) {
                     Some(usage_callout.into_any_element())
@@ -5656,7 +5750,6 @@ pub(crate) mod tests {
                         audio: true,
                         embedded_context: true,
                     }),
-                    vec![],
                     cx,
                 )
             })))
@@ -5716,7 +5809,6 @@ pub(crate) mod tests {
                         audio: true,
                         embedded_context: true,
                     }),
-                    Vec::new(),
                     cx,
                 )
             })))
