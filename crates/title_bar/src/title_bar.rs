@@ -4,7 +4,7 @@ mod onboarding_banner;
 pub mod platform_title_bar;
 mod platforms;
 mod system_window_tabs;
-mod title_bar_settings;
+pub mod title_bar_settings;
 
 #[cfg(feature = "stories")]
 mod stories;
@@ -23,20 +23,19 @@ use crate::application_menu::{
 use auto_update::AutoUpdateStatus;
 use call::ActiveCall;
 use client::{Client, UserStore, zed_urls};
-use cloud_llm_client::Plan;
+use cloud_llm_client::{Plan, PlanV1, PlanV2};
 use gpui::{
     Action, AnyElement, App, Context, Corner, Element, Entity, Focusable, InteractiveElement,
     IntoElement, MouseButton, ParentElement, Render, StatefulInteractiveElement, Styled,
     Subscription, WeakEntity, Window, actions, div,
 };
-use keymap_editor;
 use onboarding_banner::OnboardingBanner;
-use project::Project;
+use project::{Project, WorktreeSettings};
 use remote::RemoteConnectionOptions;
-use settings::Settings as _;
-use std::sync::Arc;
+use settings::{Settings, SettingsLocation};
+use std::{path::Path, sync::Arc};
 use theme::ActiveTheme;
-use title_bar_settings::TitleBarSettings;
+use title_bar_settings::{TitleBarSettings, TitleBarVisibility};
 use ui::{
     Avatar, Button, ButtonLike, ButtonStyle, Chip, ContextMenu, Icon, IconName, IconSize,
     IconWithIndicator, Indicator, PopoverMenu, PopoverMenuHandle, Tooltip, h_flex, prelude::*,
@@ -74,8 +73,49 @@ pub fn init(cx: &mut App) {
         let Some(window) = window else {
             return;
         };
-        let item = cx.new(|cx| TitleBar::new("title-bar", workspace, window, cx));
-        workspace.set_titlebar_item(item.into(), window, cx);
+        let should_show = match TitleBarSettings::get_global(cx).show {
+            TitleBarVisibility::Always => true,
+            TitleBarVisibility::Never => false,
+            TitleBarVisibility::HideInFullScreen => !window.is_fullscreen(),
+        };
+        if should_show {
+            let item = cx.new(|cx| TitleBar::new("title-bar", workspace, window, cx));
+            workspace.set_titlebar_item(item.into(), window, cx);
+        }
+
+        cx.observe_global_in::<settings::SettingsStore>(window, |workspace, window, cx| {
+            let should_show = match TitleBarSettings::get_global(cx).show {
+                TitleBarVisibility::Always => true,
+                TitleBarVisibility::Never => false,
+                TitleBarVisibility::HideInFullScreen => !window.is_fullscreen(),
+            };
+            if should_show {
+                if workspace.titlebar_item().is_none() {
+                    let item = cx.new(|cx| TitleBar::new("title-bar", workspace, window, cx));
+                    workspace.set_titlebar_item(item.into(), window, cx);
+                }
+            } else {
+                workspace.clear_titlebar_item(window, cx);
+            }
+        })
+        .detach();
+
+        cx.observe_window_bounds(window, |workspace, window, cx| {
+            let should_show = match TitleBarSettings::get_global(cx).show {
+                TitleBarVisibility::Always => true,
+                TitleBarVisibility::Never => false,
+                TitleBarVisibility::HideInFullScreen => !window.is_fullscreen(),
+            };
+            if should_show {
+                if workspace.titlebar_item().is_none() {
+                    let item = cx.new(|cx| TitleBar::new("title-bar", workspace, window, cx));
+                    workspace.set_titlebar_item(item.into(), window, cx);
+                }
+            } else {
+                workspace.clear_titlebar_item(window, cx);
+            }
+        })
+        .detach();
 
         #[cfg(not(target_os = "macos"))]
         workspace.register_action(|workspace, action: &OpenApplicationMenu, window, cx| {
@@ -433,14 +473,24 @@ impl TitleBar {
     }
 
     pub fn render_project_name(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let name = {
-            let mut names = self.project.read(cx).visible_worktrees(cx).map(|worktree| {
+        let name = self
+            .project
+            .read(cx)
+            .visible_worktrees(cx)
+            .map(|worktree| {
                 let worktree = worktree.read(cx);
-                worktree.root_name()
-            });
+                let settings_location = SettingsLocation {
+                    worktree_id: worktree.id(),
+                    path: Path::new(""),
+                };
 
-            names.next()
-        };
+                let settings = WorktreeSettings::get(Some(settings_location), cx);
+                match &settings.project_name {
+                    Some(name) => name.as_str(),
+                    None => worktree.root_name(),
+                }
+            })
+            .next();
         let is_project_selected = name.is_some();
         let name = if let Some(name) = name {
             util::truncate_and_trailoff(name, MAX_PROJECT_NAME_LENGTH)
@@ -659,9 +709,15 @@ impl TitleBar {
                         let user_login = user.github_login.clone();
 
                         let (plan_name, label_color, bg_color) = match plan {
-                            None | Some(Plan::ZedFree) => ("Free", Color::Default, free_chip_bg),
-                            Some(Plan::ZedProTrial) => ("Pro Trial", Color::Accent, pro_chip_bg),
-                            Some(Plan::ZedPro) => ("Pro", Color::Accent, pro_chip_bg),
+                            None | Some(Plan::V1(PlanV1::ZedFree) | Plan::V2(PlanV2::ZedFree)) => {
+                                ("Free", Color::Default, free_chip_bg)
+                            }
+                            Some(Plan::V1(PlanV1::ZedProTrial) | Plan::V2(PlanV2::ZedProTrial)) => {
+                                ("Pro Trial", Color::Accent, pro_chip_bg)
+                            }
+                            Some(Plan::V1(PlanV1::ZedPro) | Plan::V2(PlanV2::ZedPro)) => {
+                                ("Pro", Color::Accent, pro_chip_bg)
+                            }
                         };
 
                         menu.custom_entry(
@@ -689,7 +745,7 @@ impl TitleBar {
                             "Settings Profiles",
                             zed_actions::settings_profile_selector::Toggle.boxed_clone(),
                         )
-                        .action("Key Bindings", Box::new(keymap_editor::OpenKeymapEditor))
+                        .action("Keymap Editor", Box::new(zed_actions::OpenKeymapEditor))
                         .action(
                             "Themes…",
                             zed_actions::theme_selector::Toggle::default().boxed_clone(),
@@ -737,7 +793,7 @@ impl TitleBar {
                                 "Settings Profiles",
                                 zed_actions::settings_profile_selector::Toggle.boxed_clone(),
                             )
-                            .action("Key Bindings", Box::new(keymap_editor::OpenKeymapEditor))
+                            .action("Key Bindings", Box::new(zed_actions::OpenKeymapEditor))
                             .action(
                                 "Themes…",
                                 zed_actions::theme_selector::Toggle::default().boxed_clone(),
