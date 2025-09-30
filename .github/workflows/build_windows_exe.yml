@@ -1,25 +1,20 @@
 name: Build Windows EXE Installer
-
 on:
   schedule:
-    - cron: '0 0 * * 0'  # Run at midnight UTC every Sunday (every 7 days)
-  workflow_dispatch:  # Allow manual triggering
-
+    - cron: '0 0 * * 0' # Run at midnight UTC every Sunday (every 7 days)
+  workflow_dispatch: # Allow manual triggering
 jobs:
   build-windows:
     runs-on: windows-latest
-
     env:
-      CARGO_HOME: D:\cargo  # Use D: drive for shorter path
-
+      CARGO_HOME: D:\cargo # Use D: drive for shorter path
     steps:
       # Checkout the repository
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: recursive  # Ensure submodules are checked out
-
+          submodules: recursive # Ensure submodules are checked out
       # Configure Git for long paths as a fallback
       - name: Configure Git for long paths
         shell: pwsh
@@ -38,6 +33,25 @@ jobs:
             exit 1
           }
           Write-Output "D: drive is accessible"
+      # Install Inno Setup using Chocolatey
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          # Install Chocolatey if not already installed
+          if (-Not (Get-Command choco -ErrorAction SilentlyContinue)) {
+            Set-ExecutionPolicy Bypass -Scope Process -Force
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+            iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+            Write-Output "Chocolatey installed"
+          }
+          # Install Inno Setup
+          choco install innosetup -y
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to install Inno Setup"
+            exit 1
+          }
+          Write-Output "Inno Setup installed successfully"
+        timeout-minutes: 5
       # Verify Inno Setup is available
       - name: Verify Inno Setup
         shell: pwsh
@@ -48,22 +62,19 @@ jobs:
           }
           Write-Output "Inno Setup found"
         timeout-minutes: 1
-
       # Install Rust toolchain
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
           components: rustfmt, clippy
-
       # Cache Rust dependencies and build artifacts
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "."
           cache-on-failure: true
-          prefix-key: "v1-windows-cargo-home-d-drive"  # Unique cache key for D:\cargo
-
+          prefix-key: "v1-windows-cargo-home-d-drive" # Unique cache key for D:\cargo
       # Install Windows dependencies (if needed)
       - name: Install Windows dependencies
         shell: pwsh
@@ -101,7 +112,6 @@ jobs:
         env:
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
           CARGO_PROFILE_RELEASE_LTO: thin
-
       # Verify the executable exists
       - name: Verify executable
         shell: pwsh
@@ -134,7 +144,7 @@ jobs:
           [Icons]
           Name: "{group}\Zed"; Filename: "{app}\zed.exe"
           Name: "{group}\Uninstall Zed"; Filename: "{uninstallexe}"
-          Name: "{autodesktop}\Zed"; Filename: "{app}\zed.exe"; Tasks: desktopicon
+          Name: "{autodesktopanchor}\Zed"; Filename: "{app}\zed.exe"; Tasks: desktopicon
           [Tasks]
           Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
           [Run]
@@ -186,7 +196,6 @@ jobs:
           name: zed-windows-installer
           path: Output/zed-windows-x86_64.exe
           retention-days: 5
-
       # Generate timestamp for release tag
       - name: Generate timestamp
         id: timestamp
@@ -206,6 +215,5 @@ jobs:
           prerelease: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
 env:
   CARGO_TERM_COLOR: always
