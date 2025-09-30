@@ -23,6 +23,7 @@ use std::{
 use task::{TaskTemplate, TaskTemplates, TaskVariables, VariableName};
 use util::fs::{make_file_executable, remove_matching};
 use util::merge_json_value_into;
+use util::rel_path::RelPath;
 use util::{ResultExt, maybe};
 
 use crate::github_download::{GithubBinaryMetadata, download_server_binary};
@@ -88,10 +89,10 @@ impl ManifestProvider for CargoManifestProvider {
             depth,
             delegate,
         }: ManifestQuery,
-    ) -> Option<Arc<Path>> {
+    ) -> Option<Arc<RelPath>> {
         let mut outermost_cargo_toml = None;
         for path in path.ancestors().take(depth) {
-            let p = path.join("Cargo.toml");
+            let p = path.join(RelPath::unix("Cargo.toml").unwrap());
             if delegate.exists(&p, Some(false)) {
                 outermost_cargo_toml = Some(Arc::from(path));
             }
@@ -1028,7 +1029,7 @@ fn test_fragment(variables: &TaskVariables, path: &Path, stem: &str) -> String {
         // filter out just that module.
         Some("--lib".to_owned())
     } else if stem == "mod" {
-        maybe!({ Some(path.parent()?.file_name()?.to_string_lossy().to_string()) })
+        maybe!({ Some(path.parent()?.file_name()?.to_string_lossy().into_owned()) })
     } else if stem == "main" {
         if let (Some(bin_name), Some(bin_kind)) = (
             variables.get(&RUST_BIN_NAME_TASK_VARIABLE),
@@ -1051,7 +1052,6 @@ mod tests {
     use super::*;
     use crate::language;
     use gpui::{BorrowAppContext, Hsla, TestAppContext};
-    use language::language_settings::AllLanguageSettings;
     use lsp::CompletionItemLabelDetails;
     use settings::SettingsStore;
     use theme::SyntaxTheme;
@@ -1381,8 +1381,8 @@ mod tests {
             cx.set_global(test_settings);
             language::init(cx);
             cx.update_global::<SettingsStore, _>(|store, cx| {
-                store.update_user_settings::<AllLanguageSettings>(cx, |s| {
-                    s.defaults.tab_size = NonZeroU32::new(2);
+                store.update_user_settings(cx, |s| {
+                    s.project.all_languages.defaults.tab_size = NonZeroU32::new(2);
                 });
             });
         });

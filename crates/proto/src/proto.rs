@@ -300,6 +300,7 @@ messages!(
     (AskPassResponse, Background),
     (GitCreateBranch, Background),
     (GitChangeBranch, Background),
+    (GitRenameBranch, Background),
     (CheckForPushedCommits, Background),
     (CheckForPushedCommitsResponse, Background),
     (GitDiff, Background),
@@ -483,6 +484,7 @@ request_messages!(
     (AskPassRequest, AskPassResponse),
     (GitCreateBranch, Ack),
     (GitChangeBranch, Ack),
+    (GitRenameBranch, Ack),
     (CheckForPushedCommits, CheckForPushedCommitsResponse),
     (GitDiff, GitDiffResponse),
     (GitInit, Ack),
@@ -637,6 +639,7 @@ entity_messages!(
     Pull,
     AskPassRequest,
     GitChangeBranch,
+    GitRenameBranch,
     GitCreateBranch,
     CheckForPushedCommits,
     GitDiff,
@@ -869,25 +872,5 @@ mod tests {
             id: u32::MAX,
         };
         assert_eq!(PeerId::from_u64(peer_id.as_u64()), peer_id);
-    }
-
-    #[test]
-    #[cfg(target_os = "windows")]
-    fn test_proto() {
-        use std::path::PathBuf;
-
-        fn generate_proto_path(path: PathBuf) -> PathBuf {
-            let proto = path.to_proto();
-            PathBuf::from_proto(proto)
-        }
-
-        let path = PathBuf::from("C:\\foo\\bar");
-        assert_eq!(path, generate_proto_path(path.clone()));
-
-        let path = PathBuf::from("C:/foo/bar/");
-        assert_eq!(path, generate_proto_path(path.clone()));
-
-        let path = PathBuf::from("C:/foo\\bar\\");
-        assert_eq!(path, generate_proto_path(path.clone()));
     }
 }
