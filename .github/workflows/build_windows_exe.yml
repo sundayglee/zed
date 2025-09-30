@@ -144,7 +144,7 @@ jobs:
           [Icons]
           Name: "{group}\Zed"; Filename: "{app}\zed.exe"
           Name: "{group}\Uninstall Zed"; Filename: "{uninstallexe}"
-          Name: "{autodesktopanchor}\Zed"; Filename: "{app}\zed.exe"; Tasks: desktopicon
+          Name: "{autodesktop}\Zed"; Filename: "{app}\zed.exe"; Tasks: desktopicon
           [Tasks]
           Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
           [Run]
